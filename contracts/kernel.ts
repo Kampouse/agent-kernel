@@ -30,9 +30,9 @@ const SIGN_GAS: number = 250000000000000;   // 250 TGas forwarded to MPC sign (b
 const CB_GAS: number = 20000000000000;      // 20 TGas callback
 const EXEC_GAS: number = 50000000000000;    // 50 TGas per request_execution fwd
 const EXEC_FEE: string = "1000000000000000000000"; // 0.001 N base fee (get_pricing[0])
-const EXEC_A_WASM: string = "https://data.gramsee.dev/kernel/exec-a.wasm";
+const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/exec-a.wasm";
 const EXEC_A_HASH: string = "27977edcf795c42ffb0553f846e5efb0a455e26cb90136bd7e12a2e38dd9e6eb";
-const EXEC_B_WASM: string = "https://data.gramsee.dev/kernel/exec-b.wasm";
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/exec-b.wasm";
 const EXEC_B_HASH: string = "620fb1c6d32a0bb995ea723033efdccc3ff8a7fc0ad6d18d71b9ed812b23ea59";
 
 // ── deposit: fund the NEAR credit ledger ──
