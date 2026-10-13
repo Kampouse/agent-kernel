@@ -100,3 +100,21 @@ carries a `/// <reference path="./types/lisp-rlm.d.ts" />` at the top;
 Known: `inlayer_signer.ts` predates stricter compiler type-checks (bool≠int on
 predicate helpers, int≠str in a promise_then) — its committed `.wasm` is the
 E2E-proven last-good artifact; porting to the current checker is a v3 item.
+
+
+## v3 wire status (2026-10-13)
+
+The machinery is LIVE on-chain (gasbench2.testnet, deployed):
+- callApi → outlayer.request_execution(exec-a) — VERIFIED on-chain: worker picks up, downloads hash-pinned wasm from GitHub, executes in TEE, returns output + cost/refund
+- jobPay → v1.signer-prod MPC sign with REGISTRY path — verified in mock --trace (payload_v2 Eddsa, domain 1, 1 yocto, promise_then to onSignDone)
+- sigUpload → exec-b request_execution; onBroadcast/settle close the money loop (mock ALL GREEN 17/17)
+
+Exec wasms are TypeScript: `compile xexec-a.ts --target outlayer-p2` — same
+language as the kernel, httpGet/httpPost native ops, wasi:http under the hood.
+
+BLOCKED: arbitrary-URL fetching. lisp-rlm's P2 http-get bakes URLs into data
+segments at compile time; a non-literal URL compiles but traps at runtime
+("unknown handle index 1"). Until the emitter honors the url_ptr/url_len
+params it already passes, execs can only hit compile-time-known hosts.
+Fix is in lisp-rlm (call_outlayer.rs + wasi/mod.rs per-URL fns) — then
+xexec-a's challenge parse + payment-msg build completes the x402 loop.
