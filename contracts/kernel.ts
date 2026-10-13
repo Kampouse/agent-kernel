@@ -80,9 +80,9 @@ export function callApi(url: string, suffix: string, budget: string): string {
   // FIRE the TEE exec-a: attested fetch + x402 challenge parse + msg build.
   const path = caller + "-" + suffix;
   const input = `{"jobId":"${jobId}","url":"${url}","path":"${path}"}`;
-  const args = `{"source":{"wasm_url":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":null}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":128,"max_execution_seconds":60},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
-  near.promiseBatchCreate(OUTLAYER_CONTRACT);
-  near.promiseBatchActionFunctionCall(0, "request_execution", args, EXEC_FEE, EXEC_GAS);
+  const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":null}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":128,"max_execution_seconds":60},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
+  near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
   return jobId;
 }
 
@@ -122,7 +122,7 @@ export function sigUpload(jobId: string, sig58: string): void {
   setJobStatus(jobId, "broadcasting");
   const msgHex = near.storageGet("jobmsg:" + jobId) ?? "";
   const input = `{"jobId":"${jobId}","sigs58":["${sig58}"],"msg_hex":"${msgHex}"}`;
-  const args = `{"source":{"wasm_url":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":null}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":128,"max_execution_seconds":60},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  const args = `{"source":{"WasmUrl":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":null}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":128,"max_execution_seconds":60},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"broadcast_requested","data":{"jobId":"${jobId}"}}`);
