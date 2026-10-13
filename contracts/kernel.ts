@@ -79,7 +79,7 @@ export function callApi(url: string, suffix: string, budget: string): string {
   near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"job_started","data":{"jobId":"${jobId}","owner":"${caller}","url":"${url}","budget":"${budget}"}}`);
   // FIRE the TEE exec-a: attested fetch + x402 challenge parse + msg build.
   const path = caller + "-" + suffix;
-  const input = `{"jobId":"${jobId}","url":"${url}","path":"${path}"}`;
+  const input = `${jobId}|${url}|${path}|`;
   const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
@@ -121,7 +121,7 @@ export function sigUpload(jobId: string, sig58: string): void {
   near.storageSet("jobsig:" + jobId, sig58);
   setJobStatus(jobId, "broadcasting");
   const msgHex = near.storageGet("jobmsg:" + jobId) ?? "";
-  const input = `{"jobId":"${jobId}","sigs58":["${sig58}"],"msg_hex":"${msgHex}"}`;
+  const input = `${jobId}|${sig58}|${msgHex}`;
   const args = `{"source":{"WasmUrl":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
