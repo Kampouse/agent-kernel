@@ -30,9 +30,9 @@ const SIGN_GAS: number = 250000000000000;   // 250 TGas forwarded to MPC sign (b
 const CB_GAS: number = 20000000000000;      // 20 TGas callback
 const EXEC_GAS: number = 150000000000000;   // 150 TGas per request_execution fwd (playground uses 300; desugar+storage need real headroom)
 const EXEC_FEE: string = "4000010000000000000000"; // exact estimate_execution_cost(100M instr, 64MB, 30s) — verified via RPC view
-const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v2/exec-a.wasm";
+const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v3/exec-a.wasm";
 const EXEC_A_HASH: string = "ecac562312c8051f146c017a9d8e3b85eb56f5122fc44ebc7a80b095aa92de90";
-const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v2/exec-b.wasm";
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v3/exec-b.wasm";
 const EXEC_B_HASH: string = "5ee592d183e30e0f03a171e50906022244d9751dbb41b2ca077cebd6edff0bda";
 
 // ── deposit: fund the NEAR credit ledger ──
