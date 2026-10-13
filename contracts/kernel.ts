@@ -62,10 +62,11 @@ export function withdrawCredit(amount: string): void {
 }
 
 // ── callApi: THE entry. Agent calls this; everything else is machinery. ──
-export function callApi(url: string, suffix: string, budget: string): string {
+export function callApi(url: string, suffix: string, budget: string, payer58: string): string {
   const caller = near.predecessorAccountId();
   if (url === "" || strLen(url) > 256) { near.panic("bad url"); }
   if (suffix === "" || strLen(suffix) > 32) { near.panic("bad suffix"); }
+  if (strLen(payer58) > 48) { near.panic("bad payer"); }
   const credit = near.storageGet("credit:" + caller) ?? "0";
   if (u128Gt(budget, credit)) { near.panic("insufficient credit for budget"); }
   if (u128Gt(EXEC_FEE, budget)) { near.panic("budget below exec fee"); }
@@ -74,12 +75,12 @@ export function callApi(url: string, suffix: string, budget: string): string {
   if (held === "0") { near.storageRemove("credit:" + caller); } else { near.storageSet("credit:" + caller, held); }
   // job registry — the binding root for everything the TEE lane does
   const jobId = sha256Hash(caller + ":" + url + ":" + toStr(near.blockHeight()) + ":" + near.randomSeed());
-  const job = `{"owner":"${caller}","url":"${url}","suffix":"${suffix}","budget":"${budget}","status":"exec_a"}`;
+  const job = `{"owner":"${caller}","url":"${url}","suffix":"${suffix}","budget":"${budget}","payer":"${payer58}","status":"exec_a"}`;
   near.storageSet("job:" + jobId, job);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"job_started","data":{"jobId":"${jobId}","owner":"${caller}","url":"${url}","budget":"${budget}"}}`);
   // FIRE the TEE exec-a: attested fetch + x402 challenge parse + msg build.
   const path = caller + "-" + suffix;
-  const input = `${jobId}|${url}|${path}|`;
+  const input = `${jobId}|${url}|${path}|${payer58}`;
   const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
