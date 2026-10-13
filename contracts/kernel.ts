@@ -31,9 +31,9 @@ const CB_GAS: number = 20000000000000;      // 20 TGas callback
 const EXEC_GAS: number = 150000000000000;   // 150 TGas per request_execution fwd (playground uses 300; desugar+storage need real headroom)
 const EXEC_FEE: string = "4000010000000000000000"; // exact estimate_execution_cost(100M instr, 64MB, 30s) — verified via RPC view
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/exec-a.wasm";
-const EXEC_A_HASH: string = "27977edcf795c42ffb0553f846e5efb0a455e26cb90136bd7e12a2e38dd9e6eb";
+const EXEC_A_HASH: string = "35260b686108d88b8cec7a64371c564f7a492c75972e359357d3c9034e8a2730";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/exec-b.wasm";
-const EXEC_B_HASH: string = "620fb1c6d32a0bb995ea723033efdccc3ff8a7fc0ad6d18d71b9ed812b23ea59";
+const EXEC_B_HASH: string = "4acb0c258b74c54910443791bebe67ab1379467866ec18ada5299c5e69edc061";
 
 // ── deposit: fund the NEAR credit ledger ──
 export function deposit(): string {
@@ -80,7 +80,7 @@ export function callApi(url: string, suffix: string, budget: string): string {
   // FIRE the TEE exec-a: attested fetch + x402 challenge parse + msg build.
   const path = caller + "-" + suffix;
   const input = `{"jobId":"${jobId}","url":"${url}","path":"${path}"}`;
-  const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":null}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
   return jobId;
@@ -122,7 +122,7 @@ export function sigUpload(jobId: string, sig58: string): void {
   setJobStatus(jobId, "broadcasting");
   const msgHex = near.storageGet("jobmsg:" + jobId) ?? "";
   const input = `{"jobId":"${jobId}","sigs58":["${sig58}"],"msg_hex":"${msgHex}"}`;
-  const args = `{"source":{"WasmUrl":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":null}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  const args = `{"source":{"WasmUrl":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"broadcast_requested","data":{"jobId":"${jobId}"}}`);
