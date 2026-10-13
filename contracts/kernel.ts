@@ -29,7 +29,7 @@ const MPC_CONTRACT: string = "v1.signer-prod.testnet";
 const SIGN_GAS: number = 250000000000000;   // 250 TGas forwarded to MPC sign (burns ~8)
 const CB_GAS: number = 20000000000000;      // 20 TGas callback
 const EXEC_GAS: number = 50000000000000;    // 50 TGas per request_execution fwd
-const EXEC_FEE: string = "1000000000000000000000"; // 0.001 N base fee (get_pricing[0])
+const EXEC_FEE: string = "4000000000000000000000"; // 0.004 N: 0.001 base + 0.0001 (100M instr) + 0.003 (30s TEE)
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/exec-a.wasm";
 const EXEC_A_HASH: string = "27977edcf795c42ffb0553f846e5efb0a455e26cb90136bd7e12a2e38dd9e6eb";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/exec-b.wasm";
@@ -80,7 +80,7 @@ export function callApi(url: string, suffix: string, budget: string): string {
   // FIRE the TEE exec-a: attested fetch + x402 challenge parse + msg build.
   const path = caller + "-" + suffix;
   const input = `{"jobId":"${jobId}","url":"${url}","path":"${path}"}`;
-  const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":null}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":128,"max_execution_seconds":60},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":null}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
   return jobId;
@@ -122,7 +122,7 @@ export function sigUpload(jobId: string, sig58: string): void {
   setJobStatus(jobId, "broadcasting");
   const msgHex = near.storageGet("jobmsg:" + jobId) ?? "";
   const input = `{"jobId":"${jobId}","sigs58":["${sig58}"],"msg_hex":"${msgHex}"}`;
-  const args = `{"source":{"WasmUrl":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":null}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":128,"max_execution_seconds":60},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  const args = `{"source":{"WasmUrl":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":null}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"broadcast_requested","data":{"jobId":"${jobId}"}}`);
