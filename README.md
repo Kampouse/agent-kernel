@@ -88,3 +88,15 @@ near contract deploy gasbench2.testnet use-file contracts/kernel.wasm \
 2. `jobPay` issues the real `v1.signer.sign` raw-promise batch + result-blind callback
 3. exec A/B lisp ops (fetch/402-parse/build → attested broadcast) from the roundtrip recipe
 4. mainnet promotion (re-audit every baked account id; pin mainnet MPC + OutLayer ids)
+
+## Types
+
+`contracts/types/lisp-rlm.d.ts` — the TS frontend's ambient type definitions
+(`near.*` namespace, u128 helpers, sha/json builtins, LispArr). Each contract
+carries a `/// <reference path="./types/lisp-rlm.d.ts" />` at the top;
+`tsconfig.json` is editor intel only — real builds go through `~/bin/compile`
+(the compiler carries its own copy of the d.ts and ignores this one).
+
+Known: `inlayer_signer.ts` predates stricter compiler type-checks (bool≠int on
+predicate helpers, int≠str in a promise_then) — its committed `.wasm` is the
+E2E-proven last-good artifact; porting to the current checker is a v3 item.
