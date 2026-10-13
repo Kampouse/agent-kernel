@@ -31,9 +31,9 @@ const CB_GAS: number = 20000000000000;      // 20 TGas callback
 const EXEC_GAS: number = 150000000000000;   // 150 TGas per request_execution fwd (playground uses 300; desugar+storage need real headroom)
 const EXEC_FEE: string = "4000010000000000000000"; // exact estimate_execution_cost(100M instr, 64MB, 30s) — verified via RPC view
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v2/exec-a.wasm";
-const EXEC_A_HASH: string = "fd6cbd337d3519c54f0e1e22d8ca32a644f25a9e3f239c86536108355b2a4266";
+const EXEC_A_HASH: string = "ecac562312c8051f146c017a9d8e3b85eb56f5122fc44ebc7a80b095aa92de90";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v2/exec-b.wasm";
-const EXEC_B_HASH: string = "8e303bd000db64afd425d2fa5676b355d465a63e2e44edaca3aa97d9e8764734";
+const EXEC_B_HASH: string = "5ee592d183e30e0f03a171e50906022244d9751dbb41b2ca077cebd6edff0bda";
 
 // ── deposit: fund the NEAR credit ledger ──
 export function deposit(): string {
