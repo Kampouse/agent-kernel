@@ -1,3 +1,4 @@
+/// <reference path="./types/lisp-rlm.d.ts" />
 // kernel.ts — the agent kernel: "call this API" and everything under the hood.
 //
 // Money:   credit escrow (deposit() → NEAR credit ledger; callApi holds budget;

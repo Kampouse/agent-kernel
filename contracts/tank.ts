@@ -1,3 +1,4 @@
+/// <reference path="./types/lisp-rlm.d.ts" />
 // tank.ts — per-user Solana tank coordinator (fund/withdraw intents), lisp-rlm TS frontend.
 //
 // Design: the contract holds NO principal. It is a ledger + intent emitter.

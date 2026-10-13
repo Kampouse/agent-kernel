@@ -1,3 +1,4 @@
+/// <reference path="./types/lisp-rlm.d.ts" />
 // inlayer_signer.ts — per-user MPC Solana signing, lisp-rlm (TS frontend).
 //
 // Replaces the Rust inlayer-job sign leg. Flow:
