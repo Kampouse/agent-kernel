@@ -118,3 +118,16 @@ segments at compile time; a non-literal URL compiles but traps at runtime
 params it already passes, execs can only hit compile-time-known hosts.
 Fix is in lisp-rlm (call_outlayer.rs + wasi/mod.rs per-URL fns) — then
 xexec-a's challenge parse + payment-msg build completes the x402 loop.
+
+
+## E2E status update (2026-10-13, later)
+
+VERIFIED ON-CHAIN end-to-end: callApi → OutLayer TEE executes the TS exec-a →
+fetch-relay worker → arbitrary URL fetched → response returned into the TEE,
+output on-chain (tx 9DQCDSbx…, exec output 723 bytes, cost 0.0010734 N).
+
+Arbitrary-URL fetching now runs through fetch-relay
+(https://fetch-relay.kj95hgdgnn.workers.dev — POST {url} → {status, body}):
+exec wasms use a LITERAL relay URL, sidestepping the lisp-rlm dynamic-URL gap.
+The compiler fix (runtime URL rewrite prologue) is WIP on branch
+`dynamic-url-wip` in lisp-rlm — validates, one debug step from correct.
