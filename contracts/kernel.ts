@@ -7,8 +7,33 @@
 //          predecessor — TEE-lane calls arrive with OutLayer as predecessor).
 //          jobPay/onExecResult are predecessor-gated to the OutLayer contract:
 //          that gate IS the TEE boundary. Money only moves through attested execs.
-// Pieces:  insigner's yield/resume requestSign (proven), OutLayer request_execution
-//          (proven args shape), tank views for the USDC side.
+//
+// WIRE (all promises raw-batch, deposits explicit):
+//   callApi ─batch→ outlayer.request_execution(exec-a wasm, input={jobId,url,suffix,path},
+//                attach EXEC_FEE from escrow-backed balance)
+//   exec-a (TEE): fetch url → x402 challenge → build exact-payment Solana msg → output msgHex
+//   jobPay (outlayer lane reports output) ─batch→ v1.signer-prod.sign(payload_v2 Eddsa,
+//                path from REGISTRY, domain 1, 1 yocto, 250T) → promiseThen self.onSignDone
+//   onSignDone (self, result-blind — MPC sig bytes trip UTF-8): status=exec_b, emit sign_done
+//   sigUpload (outlayer lane; the attested relay recovered the sig from the MPC receipt
+//                via RPC — proven result-blind flow): store sig58 ─batch→
+//                outlayer.request_execution(exec-b wasm, input={jobId, sigs58, msg_hex})
+//   exec-b (TEE): assemble tx + sendTransaction POST → output = landed sig58
+//   onBroadcast (outlayer lane reports output): paying | failed+refund
+//   settle (outlayer lane): debit actual, refund leftover → job_done
+//
+// EVERY stage transition = setJobStatus. EVERY recipient/path = derived from registry.
+
+const OUTLAYER_CONTRACT: string = "outlayer.testnet";   // pin per network; re-audit on mainnet port
+const MPC_CONTRACT: string = "v1.signer-prod.testnet";
+const SIGN_GAS: number = 250000000000000;   // 250 TGas forwarded to MPC sign (burns ~8)
+const CB_GAS: number = 20000000000000;      // 20 TGas callback
+const EXEC_GAS: number = 50000000000000;    // 50 TGas per request_execution fwd
+const EXEC_FEE: string = "1000000000000000000000"; // 0.001 N base fee (get_pricing[0])
+const EXEC_A_WASM: string = "https://data.gramsee.dev/kernel/exec-a.wasm";
+const EXEC_A_HASH: string = "27977edcf795c42ffb0553f846e5efb0a455e26cb90136bd7e12a2e38dd9e6eb";
+const EXEC_B_WASM: string = "https://data.gramsee.dev/kernel/exec-b.wasm";
+const EXEC_B_HASH: string = "620fb1c6d32a0bb995ea723033efdccc3ff8a7fc0ad6d18d71b9ed812b23ea59";
 
 // ── deposit: fund the NEAR credit ledger ──
 export function deposit(): string {
@@ -22,15 +47,18 @@ export function deposit(): string {
   return total;
 }
 
-// withdraw credit back to the owner (owner-gated; internal transfer)
+// withdraw credit back to the owner (recipient derived from caller — no param)
 export function withdrawCredit(amount: string): void {
   const caller = near.predecessorAccountId();
   const bal = near.storageGet("credit:" + caller) ?? "0";
-  if (u128Gt(amount, bal)) { near.panic("insufficient credit"); }
-  const rest = u128Sub(bal, amount);
+  // money-seal: payable = amount - (amount - bal) clamped in the u128 domain; overdraw → 0
+  const overdraft = u128Sub(amount, bal);
+  const amt = u128Sub(amount, overdraft);   // = min(amount, bal) with pure u128 ops
+  if (amt !== amount) { near.panic("insufficient credit"); }
+  const rest = u128Sub(bal, amt);
   if (rest === "0") { near.storageRemove("credit:" + caller); } else { near.storageSet("credit:" + caller, rest); }
-  near.transferU128(caller, amount);
-  near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"credit_withdrawn","data":{"user":"${caller}","amount":"${amount}"}}`);
+  near.transferU128(caller, amt);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"credit_withdrawn","data":{"user":"${caller}","amount":"${amt}"}}`);
 }
 
 // ── callApi: THE entry. Agent calls this; everything else is machinery. ──
@@ -40,7 +68,8 @@ export function callApi(url: string, suffix: string, budget: string): string {
   if (suffix === "" || strLen(suffix) > 32) { near.panic("bad suffix"); }
   const credit = near.storageGet("credit:" + caller) ?? "0";
   if (u128Gt(budget, credit)) { near.panic("insufficient credit for budget"); }
-  // hold the budget
+  if (u128Gt(EXEC_FEE, budget)) { near.panic("budget below exec fee"); }
+  // hold budget + exec fee
   const held = u128Sub(credit, budget);
   if (held === "0") { near.storageRemove("credit:" + caller); } else { near.storageSet("credit:" + caller, held); }
   // job registry — the binding root for everything the TEE lane does
@@ -48,11 +77,16 @@ export function callApi(url: string, suffix: string, budget: string): string {
   const job = `{"owner":"${caller}","url":"${url}","suffix":"${suffix}","budget":"${budget}","status":"exec_a"}`;
   near.storageSet("job:" + jobId, job);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"job_started","data":{"jobId":"${jobId}","owner":"${caller}","url":"${url}","budget":"${budget}"}}`);
-  // fire the TEE exec (OutLayer request_execution — proven args shape, wired in v3)
+  // FIRE the TEE exec-a: attested fetch + x402 challenge parse + msg build.
+  const path = caller + "-" + suffix;
+  const input = `{"jobId":"${jobId}","url":"${url}","path":"${path}"}`;
+  const args = `{"source":{"wasm_url":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":null}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":128,"max_execution_seconds":60},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  near.promiseBatchCreate(OUTLAYER_CONTRACT);
+  near.promiseBatchActionFunctionCall(0, "request_execution", args, EXEC_FEE, EXEC_GAS);
   return jobId;
 }
 
-// ── TEE lane: called (directly or via OutLayer callback) with predecessor = OutLayer contract ──
+// ── TEE lane: outlayer.testnet (or kernel self during tests) drives these ──
 // exec A built the x402 payment msg; kernel signs it via MPC under the OWNER's path.
 export function jobPay(jobId: string, msgHex: string): void {
   requireOutlayer();
@@ -63,23 +97,41 @@ export function jobPay(jobId: string, msgHex: string): void {
   near.storageSet("jobmsg:" + jobId, msgHex);
   near.storageSet("jobpath:" + jobId, path);
   setJobStatus(jobId, "sign_requested");
-  // yield/resume on v1.signer.sign (insigner's proven raw-promise-batch shape; result-blind callback)
+  // MPC sign via raw promise batch (insigner's proven wire) with callback to self
+  const args = `{"request":{"payload_v2":{"Eddsa":"${msgHex}"},"path":"${path}","domain_id":1}}`;
+  const p1 = near.promiseBatchCreate(MPC_CONTRACT);
+  near.promiseBatchActionFunctionCall(p1, "sign", args, "1", SIGN_GAS);
+  near.promiseThen(p1, near.currentAccountId(), "onSignDone", `{"jobId":"${jobId}"}`, "0", CB_GAS);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"sign_requested","data":{"jobId":"${jobId}","path":"${path}"}}`);
 }
 
-// MPC resumed here (result-blind on the signature itself — daemon/next exec pulls SuccessValue)
+// MPC resumed here (result-blind on the signature itself — relay pulls SuccessValue via RPC)
 export function onSignDone(jobId: string): void {
   requireSelf();
   requireJob(jobId, "sign_requested");
   setJobStatus(jobId, "exec_b");
   near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"sign_done","data":{"jobId":"${jobId}"}}`);
-  // trigger exec B (attested broadcast) via request_execution — wired in v3
+}
+
+// attested relay uploads the sig (pulled result-blind from the MPC receipt) → fire exec-b
+export function sigUpload(jobId: string, sig58: string): void {
+  requireOutlayer();
+  requireJob(jobId, "exec_b");
+  if (sig58 === "" || strLen(sig58) > 96) { near.panic("bad sig"); }
+  near.storageSet("jobsig:" + jobId, sig58);
+  setJobStatus(jobId, "broadcasting");
+  const msgHex = near.storageGet("jobmsg:" + jobId) ?? "";
+  const input = `{"jobId":"${jobId}","sigs58":["${sig58}"],"msg_hex":"${msgHex}"}`;
+  const args = `{"source":{"wasm_url":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":null}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":128,"max_execution_seconds":60},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
+  near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"broadcast_requested","data":{"jobId":"${jobId}"}}`);
 }
 
 // exec B reports the broadcast outcome; then the API re-POST completes the job
 export function onBroadcast(jobId: string, landed: string, sig58: string): void {
   requireOutlayer();
-  requireJob(jobId, "exec_b");
+  requireJob(jobId, "broadcasting");
   if (landed === "1") {
     setJobStatus(jobId, "paying");
     near.storageSet("jobsig:" + jobId, sig58);
@@ -111,7 +163,7 @@ export function settleJob(jobId: string, actualCost: string, resultOk: string): 
     const prev = near.storageGet("credit:" + owner) ?? "0";
     near.storageSet("credit:" + owner, u128Add(prev, refund));
   }
-  near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"job_done","data":{"jobId":"${jobId}","ok":"${resultOk === "1" ? 1 : 0}","cost":"${resultOk ? actualCost : "0"}","refunded":"${refund}"}}`);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"1.0.0","event":"job_done","data":{"jobId":"${jobId}","ok":"${resultOk === "1" ? 1 : 0}","cost":"${resultOk === "1" ? actualCost : "0"}","refunded":"${refund}"}}`);
 }
 
 // ── views ──
@@ -156,6 +208,7 @@ function refundBudget(jobId: string): void {
   const prev = near.storageGet("credit:" + owner) ?? "0";
   near.storageSet("credit:" + owner, u128Add(prev, budget));
 }
-
-const OUTLAYER_CONTRACT: string = "outlayer.testnet"; // pin per network; re-audit on mainnet port
-
+// JSON string-encode (minimal: quote + escape backslash/quote — URLs and hex payloads are safe sets)
+function jsonQuote(s: string): string {
+  return `\"${s}\"`;
+}

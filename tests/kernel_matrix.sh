@@ -29,6 +29,8 @@ $M $W jobPay "{\"jobId\":\"$JOB\",\"msgHex\":\"aabb\"}" --signer mallory.testnet
 
 $M $W onSignDone "{\"jobId\":\"$JOB\"}" --signer gasbench2.testnet --json | grep -q '"outcome":"ok"' && pass "onSignDone" || fail "onSignDone"
 
+$M $W sigUpload "{\"jobId\":\"$JOB\",\"sig58\":\"3Abc\"}" --signer gasbench2.testnet --json | grep -q '"outcome":"ok"' && pass "sigUpload (attested relay)" || fail "sigUpload"
+$M $W sigUpload "{\"jobId\":\"$JOB\",\"sig58\":\"3Abc\"}" --signer mallory.testnet --json | grep -q 'trap' && pass "sigUpload rejects non-outlayer" || fail "sigUpload gate"
 $M $W onBroadcast "{\"jobId\":\"$JOB\",\"landed\":\"1\",\"sig58\":\"3Abc\"}" --signer gasbench2.testnet --json | grep -q '"outcome":"ok"' && pass "onBroadcast (landed)" || fail "onBroadcast"
 
 $M $W settleJob "{\"jobId\":\"$JOB\",\"actualCost\":\"10000000000000000000000\",\"resultOk\":\"1\"}" --signer gasbench2.testnet --json | grep -q '"outcome":"ok"' && pass "settle (0.01 actual)" || fail "settle"
@@ -48,6 +50,7 @@ $M $W callApi '{"url":"https://x.io","suffix":"main","budget":"20000000000000000
 JOB2=$($M $W callApi '{"url":"https://x.io","suffix":"main","budget":"50000000000000000000000"}' --signer gasbench2.testnet --json | jget return)
 $M $W jobPay "{\"jobId\":\"$JOB2\",\"msgHex\":\"aa\"}" --signer gasbench2.testnet --json > /dev/null
 $M $W onSignDone "{\"jobId\":\"$JOB2\"}" --signer gasbench2.testnet --json > /dev/null
+$M $W sigUpload "{\"jobId\":\"$JOB2\",\"sig58\":\"3Abc\"}" --signer gasbench2.testnet --json > /dev/null
 $M $W onBroadcast "{\"jobId\":\"$JOB2\",\"landed\":\"0\",\"sig58\":\"\"}" --signer gasbench2.testnet --json | grep -q '"outcome":"ok"' && pass "onBroadcast (failed → refund)" || fail "failed broadcast"
 C=$($M $W credit '{}' --signer gasbench2.testnet --view --json | jget return)
 [ "$C" = "990000000000000000000000" ] && pass "failed job refunds full budget" || fail "refund: $C"
