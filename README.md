@@ -131,3 +131,59 @@ Arbitrary-URL fetching now runs through fetch-relay
 exec wasms use a LITERAL relay URL, sidestepping the lisp-rlm dynamic-URL gap.
 The compiler fix (runtime URL rewrite prologue) is WIP on branch
 `dynamic-url-wip` in lisp-rlm — validates, one debug step from correct.
+
+---
+
+## kernel2 — zero-infra x402 (2026-10-13, current)
+
+`contracts/kernel2.ts` — the whole x402 loop with **no watcher, no indexer, no
+relay service**: two on-chain calls, the agent itself is the messenger, and emit
+writes exactly **one** storage key. The frozen OutLayer contract is untouched.
+
+```
+agent: kernel.deposit()                                // once
+       kernel.callApi(url, suffix, budget, payer)      // emit → jobId
+       … wait, read the execution_resolved event (free RPC, off-chain)
+       kernel.read(msgHex)                             // settle call
+       … wait for the Solana tx (getSignatureStatuses, off-chain)
+       kernel.settle(jobId, "1")                       // owner-only, atomic
+```
+
+### How it works
+
+![x402 zero-infra flow](docs/x402-zero-infra.png)
+
+### The two calls
+
+1. **Emit — `callApi(url, suffix, budget, payer)`** → escrows budget, fires
+   exec-a on the frozen outlayer contract, opens a NEAR yield
+   (`onResult`), writes one key: `lastYield:<owner>` =
+   `<dataId>|<job JSON>`. Returns just the jobId.
+2. **Read — `read(msgHex)`** → the agent pastes exec-a's output (the x402
+   payment message: `01‖payTo‖payer‖amount‖blockhash`, 105 bytes hex).
+   This resumes the owner's open yield → `onResult` fires inline in the
+   same tx: payTo must match the pinned registry entry (`pinPayTo`),
+   amount ≤ budget → MPC sign via the promise chain → sigUpload → exec-b
+   broadcasts to Solana mainnet → the owner calls `settle(jobId, ok)`
+   after seeing the tx finalized; debits the signed amount, refunds the
+   rest atomically.
+
+### Why caller-supplied proof is safe here
+
+The caller is the only party at risk: faking a cheap msgHex only underpays
+a merchant they wanted to pay — self-harm, not attack. The payTo pin blocks
+redirecting the payment to the caller's own address. Every path ends in
+settle-or-refund, so escrow can never leak. A stale yield (`read(garbage)`)
+doubles as cancel-and-refund.
+
+### Proven locally (near-mock, real bytecode + real mainnet)
+
+`/tmp/soltee/x402-local/run_k2.sh` drives the full loop: real kernel2.wasm +
+real outlayer contract.wasm in one near-mock state, real TS execs (inlayer)
+hitting the real fetch-relay and Solana mainnet, local ed25519 standing in
+for MPC. Job ends `done`, credit refunded, mainnet tx landed and finalized
+(slot 456612185 in the bench run).
+
+Known gaps before testnet: swap the local ed25519 stub for
+`v1.signer-prod.testnet` (constant change), confirm the relay's `/pay` →
+`sigUpload` path passes the gates (same msgHex it already posts).
