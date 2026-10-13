@@ -1,0 +1,90 @@
+# agent-kernel
+
+The kernel contract for "call this API, everything under the hood" — NEAR credit
+escrow + job registry + MPC signing + TEE (OutLayer) execution, paying x402
+HTTP APIs from a per-user MPC-derived Solana USDC tank.
+
+## Status (2026-10-13)
+
+| Piece | Status | Testnet |
+|---|---|---|
+| `kernel.ts` — credit escrow + job registry + state machine | **DEPLOYED, live smoke green** | tx `2U82RwJ15SW1o9rMyLMNXn6Y3nDLJeb5Mb4hR3ZMwRTD` on `gasbench2.testnet` |
+| `tank.ts` — fund/withdraw intents coordinator (no custody) | deployed (superseded by kernel's deposit()) | tx `9aSYtEjsbHQu5QjE8h4u3CHTpZvZkR8r3U7RS4HDWbU8` |
+| `inlayer_signer.ts` — per-user MPC signer (path = caller+suffix) | **LIVE, full E2E proven** | `insigner.testnet`, Solana slot 510692866 |
+| x402 payment loop (MPC payer, exact/solana) | **dry-proven vs production facilitator** | sig accepted; free sim verdict (unfunded ATA) |
+
+## Layout
+
+```
+contracts/
+  kernel.ts           THE kernel: deposit/callApi/jobPay/onSignDone/onBroadcast/settleJob
+  tank.ts             tank coordinator (ledger + intents; refuses custody)
+  inlayer_signer.ts   per-user signer (proven; the MPC leg of the kernel)
+  *.wasm              compiled artifacts matching the .ts (lisp-rlm toolchain)
+tests/                near-mock scenarios + state-machine matrix
+docs/                 design + deploy history
+```
+
+## The kernel model
+
+```
+agent: kernel.deposit()                        // once, top-up credit
+       kernel.callApi(url, suffix, budget)     // → jobId; budget held
+       … EVENT job_done { ok, cost, refunded } // settle debits actual, refunds rest
+```
+
+State machine (every transition = one `setJobStatus`, mock-verified):
+
+```
+exec_a → jobPay → sign_requested → onSignDone → exec_b
+       → onBroadcast(landed) → paying → settleJob → done | failed(+refund)
+```
+
+## Trust boundaries (the security model)
+
+- `jobPay`/`onBroadcast`/`settleJob` are predecessor-gated to `outlayer.testnet`
+  (the TEE boundary): money moves only through attested execs, only for funded jobs.
+- Signing paths compose from the JOB REGISTRY (`owner + "-" + suffix`), never from
+  `predecessorAccountId()` — TEE-lane calls arrive with OutLayer as predecessor;
+  registry binding is what keeps the path pinned to the payer.
+- Nobody — agent, TEE, or attacker — can sign outside a registered, funded job.
+- `insigner`-layer defense in depth: even direct `requestSign` composes the path
+  from the CALLER on-chain, so an attacker can only ever sign under their own
+  (empty) derived address.
+- The x402 challenge fixes the exact amount before any money moves; the facilitator
+  rejects underpayment; budget math in `settleJob` is exact u128 arithmetic.
+
+## Build / test / deploy
+
+```bash
+# compile (lisp-rlm TS frontend)
+~/bin/compile contracts/kernel.ts contracts/kernel.wasm
+
+# mock the full state machine (near-mock; NOT in-memory — it uses
+# /tmp/near-mock-state.bin globally, rm it between runs!)
+rm -f /tmp/near-mock-state.bin
+export NEAR_MOCK_CONTRACT=gasbench2.testnet
+~/dev/lisp-rlm/target/release/near-mock contracts/kernel.wasm deposit '{}' \
+  --signer gasbench2.testnet --deposit 1000000000000000000000000 --json
+# … see tests/ for the full matrix
+
+# deploy (existing funded account; faucet is 429-happy and .sub.name.testnet is
+# CreateAccountNotAllowed — self-deploy to gasbench2.testnet works)
+near contract deploy gasbench2.testnet use-file contracts/kernel.wasm \
+  without-init-call network-config testnet \
+  sign-with-access-key-file ~/.near-credentials/testnet/gasbench2.testnet.json send
+```
+
+## Deploy history (testnet)
+
+- kernel v1 `2U82RwJ…`, deposit `2vLm269q…` (0.1 N), callApi `7bvshNPN…`
+  → job `624a028b…` registered, credit 0.08 N (0.02 held) — verified via RPC
+- tank v2 `9aSYtEjs…`; fund/withdrawRequest/withdrawSettle smoke all green
+- insigner: deploy `41yWMX7f…`, memo E2E `9JxUk9t6…`, Solana `Gc53b2bSVJx…` slot 510692866
+
+## Remaining (v3)
+
+1. `callApi` fires the real OutLayer `request_execution` (proven args shape)
+2. `jobPay` issues the real `v1.signer.sign` raw-promise batch + result-blind callback
+3. exec A/B lisp ops (fetch/402-parse/build → attested broadcast) from the roundtrip recipe
+4. mainnet promotion (re-audit every baked account id; pin mainnet MPC + OutLayer ids)

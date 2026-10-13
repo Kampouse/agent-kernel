@@ -1,0 +1,4 @@
+{"steps":[
+  {"method":"pathFor","args":{"suffix":"main"},"as":"alice.testnet","view":true},
+  {"method":"getSignature","args":{"payloadHex":"aabb"},"as":"alice.testnet","view":true}
+]}
