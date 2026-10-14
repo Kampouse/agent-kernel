@@ -115,7 +115,6 @@ export function onResult(jobId: string): void {
   const respJson = near.promiseResult(0);
   const keyPos = strIndexOf(respJson, "msgHex");
   if (keyPos < 0) {
-    near.log(`DBG resp.len=${strLen(respJson)} head=${strSlice(respJson, 0, 160)}`);
     near.panic("no msgHex in exec output");
   }
   const colon = strIndexOf(strSlice(respJson, keyPos, keyPos + 20), ":");
@@ -144,13 +143,11 @@ export function onResult(jobId: string): void {
   near.storageSet("jobmsg:" + jobId, msgHex);
   near.storageSet("jobamt:" + jobId, amount);
   setJobStatus(jobId, "sign_requested");
-  near.log(`DBG status_now=${near.storageGet("job:" + jobId)}`);
   // MPC sign via raw promise batch (insigner's proven wire), callback to self
   const args = `{"request":{"payload_v2":{"Eddsa":"${msgHex}"},"path":"${path}","domain_id":1}}`;
   const p1 = near.promiseBatchCreate(MPC_CONTRACT);
   near.promiseBatchActionFunctionCall(p1, "sign", args, "1", SIGN_GAS);
   near.promiseThen(p1, near.currentAccountId(), "onSignDone", `{"jobId":"${jobId}"}`, "0", CB_GAS_SIGN);
-  near.log(`DBG onResult done`);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_requested","data":{"jobId":"${jobId}","path":"${path}","amount":"${amount}"}}`);
 }
 
