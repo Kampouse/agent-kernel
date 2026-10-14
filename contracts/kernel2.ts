@@ -1,22 +1,22 @@
 /// <reference path="./types/lisp-rlm.d.ts" />
-// kernel2.ts — zero-infra x402 kernel: two user calls (emit + read), the AGENT is the resumer.
+// kernel2.ts — zero-infra x402 kernel, v2.1: ONE user call to start, NO agent resume.
 //
 //   deposit()                        — fund escrow (unchanged)
 //   callApi(url, suffix, budget, payer58)
-//       escrow budget → job record → outlayer.request_execution(exec-a) [frozen contract]
-//       → yieldCreate("onResult") → dataId stored as lastYield:<owner>; return jobId
-//   read(msgHex)                     — NO jobId, NO sig: agent pastes only the exec-a output
-//       yieldResume(lastYield:<owner>, msgHex) → onResult runs INLINE:
+//       escrow budget → job record → outlayer.request_execution(exec-a)
+//       → promiseThen(onResult): outlayer's yield/resume value_returns exec-a's
+//         output as promiseResult(0) — no event polling, no read() call
+//   onResult                         — self-only via .then():
 //         validate payTo (registry pin) + amount ≤ budget → MPC sign (promise chain)
 //   onSignDone                       — status exec_b (relay then sigUploads the MPC sig)
 //   sigUpload(jobId, sig58)          — relay pushes sig → fires exec-b (broadcast)
 //   settle(jobId, ok)                — OWNER-only, after they see the Solana sig off-chain:
 //         debit = amount from msgHex, refund budget − amount, job done
 //
-// Trust model: caller-supplied msgHex is fine for self-service — a cheater only underpays
-// the merchant and gets no content. The one gate: payTo bytes must match the registry pin,
-// so a job can never pay an attacker-chosen address. Sig stays result-blind (relay pulls it
-// from the MPC receipt via RPC — proven flow); settle is owner-only and Solana-verifiable.
+// Trust model: unchanged. The relay/worker supplies the attested exec bytes; the kernel
+// gates them (payTo pin + budget). A cheater only underpays the merchant and gets no
+// content. Sig stays result-blind (relay pulls it from the MPC receipt via RPC); settle
+// is owner-only and Solana-verifiable.
 
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const OUTLAYER_CONTRACT: string = "outlayer.testnet";
@@ -78,53 +78,36 @@ export function callApi(url: string, suffix: string, budget: string, payer58: st
   const held = u128Sub(credit, budget);
   if (held === "0") { near.storageRemove("credit:" + caller); } else { near.storageSet("credit:" + caller, held); }
   const jobId = sha256Hash(caller + ":" + url + ":" + toStr(near.blockHeight()) + ":" + near.randomSeed());
-  // no job record yet — the whole job rides INSIDE the yield args (open promise, not our storage).
-  // emit's ONLY write is lastYield (below); read() later writes the single job:<jobId> record.
+  // ONE storage write at emit: the job record. No agent resume, no lastYield — outlayer's
+  // yield/resume delivers exec-a's output straight into onResult via promise_result.
   const job = `{"owner":"${caller}","url":"${url}","suffix":"${suffix}","budget":"${budget}","payer":"${payer58}","jobId":"${jobId}","status":"exec_a"}`;
-  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"job_started","data":{"jobId":"${jobId}","owner":"${caller}","url":"${url}","budget":"${budget}"}}`);
-  // fire exec-a on the frozen outlayer contract
+  near.storageSet("job:" + jobId, job);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.1.0","event":"job_started","data":{"jobId":"${jobId}","owner":"${caller}","url":"${url}","budget":"${budget}"}}`);
+  // fire exec-a on outlayer; the contract's on_execution_response value_returns the output
+  // to this .then() — onResult runs with the exec-a msgHex as promiseResult(0).
   const path = caller + "-" + suffix;
   const input = `${jobId}|${url}|${path}|${payer58}`;
   const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
-  // OPEN THE YIELD: the WHOLE job rides in the yield args AND in the single lastYield record.
-  const yIdx = near.yieldCreate("onResult", job, CB_GAS, 1);
-  const dataId = "yd:" + toStr(yIdx);
-  // emit's ONLY storage write: lastYield = "<dataId>|<jobJson>" — read() consumes it.
-  near.storageSet("lastYield:" + caller, strCat(dataId, strCat("|", job)));
-  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"yield_open","data":{"jobId":"${jobId}","dataId":"${dataId}"}}`);
+  near.promiseThen(p, near.currentAccountId(), "onResult", `{"jobId":"${jobId}"}`, "0", CB_GAS);
   return jobId;
 }
 
-// ── READ: agent pastes ONLY exec-a's output (msgHex). No jobId, no sig. ──
-// Resumes THIS owner's open yield → onResult runs inline with msgHex as payload.
-export function read(msgHex: string): string {
-  const caller = near.predecessorAccountId();
-  if (strLen(msgHex) > 512) { near.panic("bad msgHex"); }
-  // the ONE storage record: "<dataId>|<jobJson>" — everything else derives from it
-  const rec = near.storageGet("lastYield:" + caller) ?? "";
-  if (rec === "") { near.panic("no open job"); }
-  near.storageRemove("lastYield:" + caller);
-  const sep = strIndexOf(rec, "|");
-  const dataId = strSlice(rec, 0, sep);
-  const jobSpec = strSlice(rec, sep + 1, strLen(rec));
-  const jobId = near.jsonGetStr("jobId", jobSpec) ?? "";
-  if (jobId === "") { near.panic("bad record"); }
-  // persist the job record (sigUpload/settle/job views need it after this tx)
-  near.storageSet("job:" + jobId, jobSpec);
-  const n = near.yieldResume(dataId, msgHex);
-  if (n !== 1) { near.panic("resume failed"); }
-  return jobId;
-}
-
-// ── resumed INLINE by read(): payload (exec-a msgHex) = promiseResult(0) ──
+// ── resumed via .then(): promiseResult(0) = exec-a's output (msgHex) ──
 // Validates against the registry pin, then kicks the MPC sign. Status: exec_a → sign_requested.
 export function onResult(jobId: string): void {
-  requireSelf();
+  // v2.1: predecessor = outlayer (the yield resumer creates this receipt)
+  requireOutlayer();
   requireJob(jobId, "exec_a");
-  const msgHex = near.promiseResult(0);
+  // read the job record BEFORE promiseResult: the 292-byte msgHex copy into guest
+  // heap can clobber the "job:"+jobId string still referenced below (observed in
+  // near-mock: prefix bytes replaced by heap garbage mid-concat).
   const raw = near.storageGet("job:" + jobId) ?? "";
+  // promiseResult(0) = outlayer's on_execution_response value_return = the FULL
+  // response JSON ({"success":true,"output":{"Text":"<msgHex>"},...}); extract Text.
+  const respJson = near.promiseResult(0);
+  const msgHex = near.jsonGetStr("output.Text", respJson) ?? "";
   const owner = near.jsonGetStr("owner", raw) ?? "";
   const suffix = near.jsonGetStr("suffix", raw) ?? "";
   const budget = near.jsonGetStr("budget", raw) ?? "";
@@ -152,7 +135,8 @@ export function onResult(jobId: string): void {
 
 // MPC resumed here (result-blind on the signature itself — relay pulls SuccessValue via RPC)
 export function onSignDone(jobId: string): void {
-  requireSelf();
+  // v2.1: predecessor = MPC contract (its sign promise .then's back here)
+  if (near.predecessorAccountId() !== MPC_CONTRACT) { near.panic("mpc lane only"); }
   requireJob(jobId, "sign_requested");
   setJobStatus(jobId, "exec_b");
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_done","data":{"jobId":"${jobId}"}}`);
@@ -209,9 +193,6 @@ export function creditOf(user: string): string {
 }
 export function job(jobId: string): string {
   return near.storageGet("job:" + jobId) ?? "";
-}
-export function lastJob(): string {
-  return near.storageGet("lastYield:" + near.predecessorAccountId()) ?? "";
 }
 
 // ── internals ──
