@@ -167,9 +167,11 @@ export function onQuote(jobId: string): void {
   requireJob(jobId, "quote_phase");
   const raw = near.storageGet("job:" + jobId) ?? "";
   const respJson = near.promiseResult(0);
-  const addr = sliceEscapedStr(respJson, "depositAddress", 80);
-  const memo = sliceEscapedStr(respJson, "depositMemo", 64);
-  const amountIn = sliceEscapedStr(respJson, "amountIn", 40);
+  // jsonGetStrEsc (lisp-rlm 2026-10-14): promiseResult delivers the exec output
+  // as JSON-escaped text; the builtin unescapes then scans at any object depth.
+  const addr = jsonGetStrEsc("depositAddress", respJson) ?? "";
+  const memo = jsonGetStrEsc("depositMemo", respJson) ?? "";
+  const amountIn = jsonGetStrEsc("amountIn", respJson) ?? "";
   if (strLen(addr) < 20) { near.panic("no deposit address in quote"); }
   if (strLen(amountIn) === 0) { near.panic("no amountIn in quote"); }
   const budget = near.jsonGetStr("budget", raw) ?? "";

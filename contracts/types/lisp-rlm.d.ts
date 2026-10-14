@@ -85,6 +85,7 @@ declare function strIndexOf(haystack: string, needle: string): number;
 declare function strToNum(s: string): number;
 declare function toStr(n: any): string;
 declare function jsonGet(key: string, json: string): string;
+declare function jsonGetStrEsc(key: string, escapedJson: string): string;
 /** Single-pass multi-key extraction from the TX INPUT (2026-09-14):
  *  jsonExtract("a", "b", "n") → ["val", "", "7"] — raw span strings
  *  (strings unquoted, numbers as text, objects/arrays as full JSON text,
