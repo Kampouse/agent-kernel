@@ -1,91 +1,99 @@
 # Intents-Funded kernel2 — Design Notes
 
-Status: DESIGN v2 — real intents (defuse engine), per user decision. Not yet
-implemented. Native NEAR `deposit()` remains the live funding path until this
-lands.
+Status: DESIGN v3 — contract-baked funding. The contract itself moves the
+deposit to Solana at job time; no operator float. Not yet implemented.
+Native NEAR `deposit()` remains live until this lands.
 
-## The value path (two sides, honestly separated)
+## The model (v3)
+
+Bake the funding INTO the contract: user deposits USDC into kernel2; when a
+job runs, kernel2 itself moves that value across so the MPC-derived payer can
+pay the merchant. No operator float, no manual tops. The contract is the
+exchanger.
 
 ```
-USER (NEAR side)                     KERNEL                    SOLANA side
-─────────────────                    ─────                     ───────────
-USDC (nep141)                        credit_token ledger       MPC-derived payer
-  │ ft_transfer_call ──────────────► credit upon deposit           │
-  │   to kernel2                     │                            │ pays merchant
-  │                                  ▼                            ▼
-  └─ optional: route through      settle debits ────────►  merchant gets paid
-     defuse intents vault            credit                 (x402, from payer)
+USER                    KERNEL2 (all on-chain, contract-baked)        SOLANA
+────                    ──────────────────────────────────────        ──────
+USDC ─ft_transfer_call─► credit_token:<user> (escrow)
+                          │ callApi:
+                          │ 1. gate: credit ≥ budget
+                          │ 2. execute defuse intent:
+                          │    deliver USDC to DERIVED PAYER
+                          │    (solver fills cross-chain)
+                          ▼
+                          payer funded ◄─────────────── solver delivers
+                          │
+                          ├─► exec-a (fetch, 402, balance check)
+                          ├─► MPC sign
+                          └─► exec-b pays merchant FROM the payer
+                                └─ merchant paid 1:1 by the user's own
+                                   deposit, moved by the contract
 ```
 
-The deposit (user→kernel) and the payment (payer→merchant) are DIFFERENT
-transfers on DIFFERENT chains. Nothing "moves" the user's deposit to Solana.
-What crosses is *obligation*: the kernel owes the merchant on Solana and owes
-the user a refund right on NEAR; settle nets them. The only asset that must
-physically exist on Solana is the payer's float.
+## Why this beats operator-float (v2)
 
-## Funding leg — intents (user decision: USE INTENTS)
+- Each job is backed 1:1 by its own deposit, moved at job time. The kernel
+  never owes anyone a float; insolvency is impossible by construction.
+- Refund: intent not fired → credit returns; fired but unfilled → job
+  stalls in `funding` and refunds. Escrow-can't-leak preserved.
 
-User deposits USDC (nep141) via `ft_transfer_call` to the defuse intents
-contract (or directly to kernel2 — see "kernel2 as FT receiver"), then the
-kernel's settle path is unchanged. The defuse contract (verified in
-~/dev/near-intents, v0.2.10):
+## Mechanics (grounded in defuse v0.2.10 source)
 
-- `ft_on_transfer(sender_id, amount, msg)` — msg names the internal
-  recipient; token identity = **bare predecessor** (nep141:<id> string traps
-  silently).
-- Intent enum (mod.rs:42): AddPublicKey / Transfer / FtWithdraw / NftWithdraw
-  / MtWithdraw / NativeWithdraw / StorageDeposit / TokenDiff / SetAuthBy...
-  — **no cross-chain intent exists on-contract**. FtWithdraw.receiver_id is
-  a NEAR AccountId (nep141 → NEAR accounts only).
-- Cross-chain exits are therefore SOLVER territory: solvers watch published
-  intents and fill on the destination chain. That is a real, bonded,
-  competitive network — but it IS the trusted-ish leg. Accept it: the user
-  has decided intents are in.
+- defuse executes SIGNED intents on-chain immediately (`execute_intents`,
+  state deltas, relayer.rs). There is NO on-contract cross-chain intent:
+  `FtWithdraw` delivers NEP141 to NEAR accounts only (receiver_id is a NEAR
+  AccountId).
+- Cross-chain delivery = SOLVER fill. Solvers watch chain state and
+  complete the Solana leg asynchronously. kernel2 can compose, sign, and pay
+  for the intent on-chain, but the Solana landing is async — the kernel
+  cannot verify it via its own promise chain. THIS IS THE ONE TRUST LEG.
+  Accepted: solvers are the bridge. Bonded + competitive, zero custom
+  bridge code on our side.
+- Practical route: solver-quoted cross-chain (1Click-style pattern):
+  USDC on NEAR → USDC at the derived payer on Solana. On-chain artifact =
+  token escrow + claim inside the intents contract; kernel2 drives it via
+  cross-contract calls as part of the job.
 
-### Where intents plug in (minimal surface)
+## Verifying the payer got funded — no indexer needed
 
-1. **Deposit**: user funds the defuse account, then kernel2's funding method
-   composes a signed defuse intent `Transfer` (kernel2 ← user, token, amount)
-   OR kernel2 is a plain FT receiver. Preference: kernel2 as plain FT
-   receiver (Shape A) for the *ledger*, defuse only if the user wants to pay
-   from held intents positions. Fewest moving parts; no solver on the
-   deposit side.
-2. **Solana float**: this is where intents genuinely help. The payer
-   (MPC-derived Solana address) needs USDC/SOL float. Options:
-   a. Operator tops the float off-chain (simple; business trust).
-   b. Kernel publishes a defuse intent that pays a solver to deliver USDC to
-      the derived payer on Solana. Solver network = the bridge. Bonded,
-      competitive, no custom code by us — we reuse existing intents infra
-      instead of building a bridge.
-3. **Settle**: unchanged — exact u128 debit of the user's token credit
-   against the signed amount. PayTo pin + budget gates unchanged.
+Exec-a already runs in the TEE with HTTP. Add a step: before building the
+payment, exec-a queries Solana RPC for the payer's USDC balance.
+- Funded → proceed; amount gate additionally checks payer balance ≥ price.
+- Not funded (solver lag/fail) → exec-a returns "payer unfunded"; kernel
+  sets status `funding` — retry exec-a later, or refund. Escrow intact
+  either way.
+Verification stays inside the kernel's own execution path (TEE reads RPC),
+consistent with the no-indexer rule.
 
-## Trust ledger (final)
+## Order of operations in callApi (v3)
 
-- NEAR side escrow: kernel2's own promise chain (unchanged).
-- Solana payment: MPC network signing (unchanged).
-- Cross-chain float replenishment: defuse solver network (NEW, accepted by
-  decision) — or operator float as the simpler v1.
-- No watchers, no indexers, no custom relayer anywhere.
+1. Gate: user `credit_token` ≥ budget.
+2. Fire the cross-chain funding (defuse intent / solver escrow) delivering
+   `amount` to the derived payer; `.then(onFunded)` acks the on-chain
+   intent execution (the solver fill itself remains async).
+3. onFunded → fire exec-a; exec-a re-checks payer balance via RPC.
+4. Unfunded → status `funding` (retry or refund); funded → normal flow:
+   gates → MPC sign → exec-b pays → settle (debit credit at signed time,
+   as today).
 
-## Implementation sketch (kernel2 v2.3)
+## Trust ledger (v3, final)
 
-1. `ft_on_transfer` in kernel2 (lisp-rlm TS): predecessor = token contract,
-   msg = credit recipient → `credit_token:<user>:<predecessor>`.
-2. `settle` gains token-id arg; debits the matching ledger only.
-3. exec-a amount must equal the escrowed token amount — gate next to payTo
-   pin in onResult.
-4. Float: v1 = operator-top (document the address, monitor), v2 = defuse
-   intent per-top-up with solver fill to the derived payer.
-5. Refund: ft_transfer back to user; escrow cannot leak (owner-only
-   settle-or-refund unchanged).
+- Escrow, gates, settle: kernel2's promise chain (unchanged).
+- Payment signing: MPC network (unchanged).
+- Cross-chain value movement: solver network (accepted; the only bridge).
+- Funding verification: TEE reads Solana RPC (no indexer).
+- Operator float: ELIMINATED.
+- Watchers/indexers/custom relayers: none.
 
 ## Open items
 
-- Which USDC? Solana USDC ≠ NEAR USDC (bridged variants: CCTP vs Wormhole).
-  Merchant's payTo token decides the Solana-side asset; the NEAR-side
-  deposit asset should be the bridged twin of it (same canonical mint) to
-  avoid an oracle. If the merchant token has no NEAR-side nep141 twin, a
-  swap is unavoidable → defuse TokenDiff/solver swap on deposit (accept).
-- Derived-payer float accounting: kernel must track payer balance vs
-  outstanding obligations — reject callApi if float < amount.
+- Which USDC pair: Solana native vs NEAR bridged twin — must share a
+  canonical mint or the solver swaps inside the intent (defuse TokenDiff
+  supports on-chain swaps; cross-chain quote is solver-side).
+- Solver route wire format: defuse `execute_intents` + TokenDiff on NEAR,
+  cross-chain quote via solver API — exact calls TBD.
+- Gas: callApi closure is at 295/300 Tgas static cap; the funding
+  cross-contract call needs literal room — likely split into
+  `fundAndCall` (two user txs) or shave existing literals.
+- Derived-payer USDC ATA creation (rent): kernel pays from credit, or the
+  solver creates it during fill.
