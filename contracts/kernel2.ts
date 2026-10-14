@@ -152,24 +152,49 @@ export function onResult(jobId: string): void {
 }
 
 // MPC resumed here (result-blind on the signature itself — relay pulls SuccessValue via RPC)
+// MPC resumed here: promiseResult(0) = the sign contract's value_return — the signature
+// itself ({"scheme":"Ed25519","signature":[64 bytes]}). Read it, b58-encode, fire exec-b
+// IN THIS CALLBACK. No relay, no indexer, no sigUpload — the sig rides the kernel's own
+// promise chain from v1.signer-prod (stronger trust than any off-chain fetcher).
 export function onSignDone(jobId: string): void {
-  // v2.1: predecessor = MPC contract (its sign promise .then's back here)
   // nearcore .then semantics: the callback receipt's predecessor = the promise chain's
-  // SCHEDULER (this contract), not the dep promise's target. Mainnet verified: the MPC
-  // sign batch .then'd here arrives with predecessor = self. The MPC lane is still
-  // enforced: the relay verifies the signature against the MPC receipt off-chain, and
-  // sigUpload (outlayer-gated) requires it before exec-b.
+  // SCHEDULER (this contract), not the dep promise's target — mainnet verified.
   if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("mpc lane only"); }
   requireJob(jobId, "sign_requested");
-  setJobStatus(jobId, "exec_b");
-  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_done","data":{"jobId":"${jobId}"}}`);
-}
-
-// attested relay uploads the sig (pulled from the MPC receipt) → fire exec-b
-export function sigUpload(jobId: string, sig58: string): void {
-  requireOutlayer();
-  requireJob(jobId, "exec_b");
-  if (sig58 === "" || strLen(sig58) > 96) { near.panic("bad sig"); }
+  // promiseResult(0) = the signature JSON in ESCAPED form (outlayer-style serialization):
+  //   {\"scheme\":\"Ed25519\",\"signature\":[5,91,205,...]}
+  // Slice the 64 decimal byte values out (keyPos → '[' → numbers → ']'), decode to bytes,
+  // b58-encode → sig58. Reject malformed results instead of broadcasting garbage.
+  const respJson = near.promiseResult(0);
+  const keyPos = strIndexOf(respJson, "signature");
+  if (keyPos < 0) { near.panic("no signature in MPC result"); }
+  const openPos = strIndexOf(strSlice(respJson, keyPos, keyPos + 16), "[");
+  if (openPos < 0) { near.panic("no signature array"); }
+  const valStart = keyPos + openPos + 1;
+  const closeRel = strIndexOf(strSlice(respJson, valStart, valStart + 260), "]");
+  if (closeRel < 0) { near.panic("no signature array end"); }
+  const nums = strSlice(respJson, valStart, valStart + closeRel);
+  // count commas → must be 63 (64 bytes)
+  let commas = 0;
+  for (let i = 0; i < strLen(nums); i = i + 1) {
+    if (strSlice(nums, i, i + 1) === ",") { commas = commas + 1; }
+  }
+  if (commas !== 63) { near.panic("bad signature length"); }
+  // decode decimal bytes → hex, then to bytes
+  let hexSig = "";
+  let pos = 0;
+  for (let b = 0; b < 64; b = b + 1) {
+    const sep = strIndexOf(strSlice(nums, pos, strLen(nums)), ",");
+    const end = (sep < 0) ? strLen(nums) : pos + sep;
+    const tok = strSlice(nums, pos, end);
+    const v = decU32(tok);
+    if (v > 255) { near.panic("bad signature byte"); }
+    hexSig = strConcatBytes(hexSig, v);
+    pos = end + 1;
+  }
+  const sig58 = b58EncodeBytes(hexSig);
+  if (sig58 === "") { near.panic("sig encode failed"); }
+  // fire exec-b directly
   near.storageSet("jobsig:" + jobId, sig58);
   setJobStatus(jobId, "broadcasting");
   const msgHex = near.storageGet("jobmsg:" + jobId) ?? "";
@@ -177,7 +202,58 @@ export function sigUpload(jobId: string, sig58: string): void {
   const args = `{"source":{"WasmUrl":{"url":"${EXEC_B_WASM}","hash":"${EXEC_B_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_done","data":{"jobId":"${jobId}"}}`);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"broadcast_requested","data":{"jobId":"${jobId}"}}`);
+}
+
+const DIG: string = "0123456789";
+// decimal string (0..255) → u32
+function decU32(s: string): number {
+  let v = 0;
+  for (let i = 0; i < strLen(s); i = i + 1) {
+    const d = DIG.indexOf(strSlice(s, i, i + 1));
+    if (d < 0) { return 99999; }
+    v = v * 10 + d;
+  }
+  return v;
+}
+
+// append one byte (as hex pair) to a hex string
+function strConcatBytes(hexSoFar: string, byteVal: number): string {
+  return hexSoFar + strSlice(HXD, byteVal / 16, byteVal / 16 + 1) + strSlice(HXD, byteVal % 16, byteVal % 16 + 1);
+}
+
+// 64-byte hex → base58 (MSB-first digits array, same scheme as b58ToHex reversed)
+function b58EncodeBytes(hexSig: string): string {
+  const bytes: number[] = [];
+  for (let i = 0; i < 64; i = i + 1) {
+    const hi = hexNibble(strSlice(hexSig, i * 2, i * 2 + 1));
+    const lo = hexNibble(strSlice(hexSig, i * 2 + 1, i * 2 + 2));
+    if (hi < 0 || lo < 0) { return ""; }
+    bytes.push(hi * 16 + lo);
+  }
+  const digits: number[] = [0];
+  let dlen = 1;
+  for (let i = 0; i < 64; i = i + 1) {
+    let carry = bytes[i];
+    for (let j = 0; j < dlen; j = j + 1) {
+      const x = digits[j] * 256 + carry;
+      digits[j] = x % 58;
+      carry = (x - digits[j]) / 58;
+    }
+    while (carry > 0) { digits[dlen] = carry % 58; dlen = dlen + 1; carry = (carry - digits[dlen - 1]) / 58; }
+  }
+  let out = "";
+  for (let i = dlen - 1; i >= 0; i = i - 1) {
+    out = out + strSlice(B58, digits[i], digits[i] + 1);
+  }
+  return out;
+}
+
+const HXD: string = "0123456789abcdef";
+function hexNibble(c: string): number {
+  const v = HXD.indexOf(c);
+  return v; // lowercase-only; -1 on miss (we always build lowercase)
 }
 
 // ── SETTLE: owner-only, after they see the Solana tx land (off-chain proof they hold). ──
