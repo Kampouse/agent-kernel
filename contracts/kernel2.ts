@@ -26,9 +26,9 @@ const CB_GAS: number = 20000000000000;
 const EXEC_GAS: number = 150000000000000;
 const EXEC_FEE: string = "4000010000000000000000";
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
-const EXEC_A_HASH: string = "c959eba24d9ed7f86d02b71da4d71fb6400c5a62aac404d380beaf4f03e6f50e";
+const EXEC_A_HASH: string = "93eee605e34b46cbd59349fa391ef796e0586bf8e15fd3b8fcb60a05583494d8";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "3ee30751002e1c4d4099e0c1b311883e94bf7e17ae9ca80266312db5c47d2665";
+const EXEC_B_HASH: string = "7656077aa83aac99b9beddde38b5f5e05423924ce6af9befeaeb3d2bff0dfbd0";
 
 // ── admin: pin the payTo per suffix (self only — the merchant table) ──
 export function pinPayTo(suffix: string, payTo58: string): void {
