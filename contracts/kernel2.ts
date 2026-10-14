@@ -105,9 +105,13 @@ export function onResult(jobId: string): void {
   // near-mock: prefix bytes replaced by heap garbage mid-concat).
   const raw = near.storageGet("job:" + jobId) ?? "";
   // promiseResult(0) = outlayer's on_execution_response value_return = the FULL
-  // response JSON ({"success":true,"output":{"Text":"<msgHex>"},...}); extract Text.
+  // response JSON ({"success":true,"output":{"Text":"<exec output>"},...}).
+  // The exec's Text is itself a JSON object: {"ok":true,"free":false,"payTo":...,
+  // "amount":n,"blockhash":"...","msgHex":"<hex>",...} — extract the inner msgHex.
   const respJson = near.promiseResult(0);
-  const msgHex = near.jsonGetStr("output.Text", respJson) ?? "";
+  const outText = near.jsonGetStr("output.Text", respJson) ?? "";
+  const msgHex = near.jsonGetStr("msgHex", outText) ?? "";
+  if (msgHex === "") { near.panic("no msgHex in exec output"); }
   const owner = near.jsonGetStr("owner", raw) ?? "";
   const suffix = near.jsonGetStr("suffix", raw) ?? "";
   const budget = near.jsonGetStr("budget", raw) ?? "";
