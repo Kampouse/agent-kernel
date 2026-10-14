@@ -30,7 +30,7 @@ const CB_GAS_SIGN: number = 20000000000000;
 const EXEC_GAS: number = 150000000000000;
 const EXEC_FEE: string = "4000010000000000000000";
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
-const EXEC_A_HASH: string = "148d0cb9e4872ff802f57e36daab6206980a7fd446a8e92f7ff37e96e4783515";
+const EXEC_A_HASH: string = "a42d8361e1b4211f2b8543ecde409f36e159a18752ec27c17a5661065365d464";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
 const EXEC_B_HASH: string = "0c35c3ea80cb1726d1155b2feca5f32d222f5fda9a2e85ad190563c327409e89";
 
