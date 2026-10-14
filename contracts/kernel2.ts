@@ -22,11 +22,14 @@ const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 const OUTLAYER_CONTRACT: string = "outlayer.testnet";
 const MPC_CONTRACT: string = "v1.signer-prod.testnet";
 const SIGN_GAS: number = 100000000000000;
-// onResult forwards SIGN_GAS (250) to the MPC batch — its .then gas must cover that plus
-// its own work (~3 Tgas), all within nearcore's 300 Tgas per-receipt cap. The onSignDone
-// callback itself needs only a sliver (no forwarding).
+// onResult forwards SIGN_GAS (100) to the MPC batch; onSignDone decodes the signature
+// (its own work ~25 Tgas) and forwards EXEC_GAS (150) to exec-b. Both callbacks must fit
+// their whole call closure inside nearcore's 300 Tgas per-receipt cap:
+//   onResult: 100 + 145 = 245 ≤ 300 ✓   onSignDone: 150 + 180 = 330 > 300 →
+// EXEC_GAS for exec-b comes from the onSignDone receipt, so CB_GAS_SIGN covers work+150,
+// and SIGN_GAS + CB_GAS_SIGN stays ≤ 300: 100 + 180 = 280 ✓.
 const CB_GAS_RESULT: number = 145000000000000;
-const CB_GAS_SIGN: number = 20000000000000;
+const CB_GAS_SIGN: number = 180000000000000;
 const EXEC_GAS: number = 150000000000000;
 const EXEC_FEE: string = "4000010000000000000000";
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
