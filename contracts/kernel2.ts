@@ -42,7 +42,7 @@ const EXEC_B_HASH: string = "0c35c3ea80cb1726d1155b2feca5f32d222f5fda9a2e85ad190
 // fires ONE ft_transfer_call to the quote's depositAddress. 1Click solvers deliver and
 // swap; refunds land in this contract's intents balance. Exec-a still checks the payer's
 // Solana balance before paying — solver lag surfaces as job status `funding`, refundable.
-const TOKEN_CONTRACT: string = "usdc.testtoken"; // mock FT; testnet twin: usdc.tkn-defuse.testnet; mainnet: bridged USDC
+const TOKEN_CONTRACT: string = "usdc.testnet"; // testnet USDC FT (1Click has no testnet — funding rail untestable on testnet); mainnet: bridged USDC nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 const FT_GAS: number = 10000000000000;
@@ -76,9 +76,8 @@ export function deposit(): string {
 export function withdrawCredit(amount: string): void {
   const caller = near.predecessorAccountId();
   const bal = near.storageGet("credit:" + caller) ?? "0";
-  const overdraft = u128Sub(amount, bal);
-  const amt = u128Sub(amount, overdraft);
-  if (amt !== amount) { near.panic("insufficient credit"); }
+  if (u128Lt(bal, amount)) { near.panic("insufficient credit"); }
+  const amt = amount;
   const rest = u128Sub(bal, amt);
   if (rest === "0") { near.storageRemove("credit:" + caller); } else { near.storageSet("credit:" + caller, rest); }
   near.transferU128(caller, amt);
