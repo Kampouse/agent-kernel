@@ -21,8 +21,12 @@
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const OUTLAYER_CONTRACT: string = "outlayer.testnet";
 const MPC_CONTRACT: string = "v1.signer-prod.testnet";
-const SIGN_GAS: number = 250000000000000;
-const CB_GAS: number = 20000000000000;
+const SIGN_GAS: number = 100000000000000;
+// onResult forwards SIGN_GAS (250) to the MPC batch — its .then gas must cover that plus
+// its own work (~3 Tgas), all within nearcore's 300 Tgas per-receipt cap. The onSignDone
+// callback itself needs only a sliver (no forwarding).
+const CB_GAS_RESULT: number = 145000000000000;
+const CB_GAS_SIGN: number = 20000000000000;
 const EXEC_GAS: number = 150000000000000;
 const EXEC_FEE: string = "4000010000000000000000";
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
@@ -90,7 +94,7 @@ export function callApi(url: string, suffix: string, budget: string, payer58: st
   const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
-  near.promiseThen(p, near.currentAccountId(), "onResult", `{"jobId":"${jobId}"}`, "0", CB_GAS);
+  near.promiseThen(p, near.currentAccountId(), "onResult", `{"jobId":"${jobId}"}`, "0", CB_GAS_RESULT);
   return jobId;
 }
 
@@ -104,14 +108,25 @@ export function onResult(jobId: string): void {
   // heap can clobber the "job:"+jobId string still referenced below (observed in
   // near-mock: prefix bytes replaced by heap garbage mid-concat).
   const raw = near.storageGet("job:" + jobId) ?? "";
-  // promiseResult(0) = outlayer's on_execution_response value_return = the FULL
-  // response JSON ({"success":true,"output":{"Text":"<exec output>"},...}).
-  // The exec's Text is itself a JSON object: {"ok":true,"free":false,"payTo":...,
-  // "amount":n,"blockhash":"...","msgHex":"<hex>",...} — extract the inner msgHex.
+  // promiseResult(0) = the exec's output text in JSON-ESCAPED form (outlayer serializes
+  // the Text output as a JSON string, so quotes are backslash-escaped). jsonGetStr's
+  // value-span scan overshoots on escaped content, so slice by index:
+  //   \"msgHex\":\"<64-char hex>\"  →  find the key, skip `":"`, take 64 chars.
   const respJson = near.promiseResult(0);
-  const outText = near.jsonGetStr("output.Text", respJson) ?? "";
-  const msgHex = near.jsonGetStr("msgHex", outText) ?? "";
-  if (msgHex === "") { near.panic("no msgHex in exec output"); }
+  const keyPos = strIndexOf(respJson, "msgHex");
+  if (keyPos < 0) {
+    near.log(`DBG resp.len=${strLen(respJson)} head=${strSlice(respJson, 0, 160)}`);
+    near.panic("no msgHex in exec output");
+  }
+  const colon = strIndexOf(strSlice(respJson, keyPos, keyPos + 20), ":");
+  const valStart = keyPos + colon + 3;          // skip ":\" (colon, quote, escape)
+  // The value runs until the ESCAPED closing quote (\") — find it and slice the hex out.
+  const winEnd = valStart + 256;
+  const escQuote = strIndexOf(strSlice(respJson, valStart, winEnd), "\\\"");
+  const msgHex = strSlice(respJson, valStart, valStart + escQuote);
+  if (strLen(msgHex) < 100) {
+    near.panic("bad msgHex in exec output");
+  }
   const owner = near.jsonGetStr("owner", raw) ?? "";
   const suffix = near.jsonGetStr("suffix", raw) ?? "";
   const budget = near.jsonGetStr("budget", raw) ?? "";
@@ -133,14 +148,19 @@ export function onResult(jobId: string): void {
   const args = `{"request":{"payload_v2":{"Eddsa":"${msgHex}"},"path":"${path}","domain_id":1}}`;
   const p1 = near.promiseBatchCreate(MPC_CONTRACT);
   near.promiseBatchActionFunctionCall(p1, "sign", args, "1", SIGN_GAS);
-  near.promiseThen(p1, near.currentAccountId(), "onSignDone", `{"jobId":"${jobId}"}`, "0", CB_GAS);
+  near.promiseThen(p1, near.currentAccountId(), "onSignDone", `{"jobId":"${jobId}"}`, "0", CB_GAS_SIGN);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_requested","data":{"jobId":"${jobId}","path":"${path}","amount":"${amount}"}}`);
 }
 
 // MPC resumed here (result-blind on the signature itself — relay pulls SuccessValue via RPC)
 export function onSignDone(jobId: string): void {
   // v2.1: predecessor = MPC contract (its sign promise .then's back here)
-  if (near.predecessorAccountId() !== MPC_CONTRACT) { near.panic("mpc lane only"); }
+  // nearcore .then semantics: the callback receipt's predecessor = the promise chain's
+  // SCHEDULER (this contract), not the dep promise's target. Mainnet verified: the MPC
+  // sign batch .then'd here arrives with predecessor = self. The MPC lane is still
+  // enforced: the relay verifies the signature against the MPC receipt off-chain, and
+  // sigUpload (outlayer-gated) requires it before exec-b.
+  if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("mpc lane only"); }
   requireJob(jobId, "sign_requested");
   setJobStatus(jobId, "exec_b");
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_done","data":{"jobId":"${jobId}"}}`);
