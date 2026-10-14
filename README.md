@@ -6,35 +6,72 @@ HTTP APIs from a per-user MPC-derived Solana tank.
 
 ## kernel2 (current) — one call, zero infrastructure
 
-`contracts/kernel2.ts` v2.2: **one user call starts and completes the whole
-payment.** No watcher, no indexer, no relay service, no agent resume loop, no
-sig upload step. The frozen OutLayer contract is untouched.
+`contracts/kernel2.ts` v2.3: **one user call starts and completes the whole
+payment, and the contract itself funds the payer cross-chain.** No watcher,
+no indexer, no relay service, no agent resume loop, no sig upload step, no
+operator float. The frozen OutLayer contract is untouched.
 
 ```
-agent: kernel2.deposit()                              // once, top-up credit
+agent: kernel2.ft_transfer_call(TOKEN, amt, caller)   // once, top-up USDC credit
        kernel2.callApi(url, suffix, budget, payer58)  // → jobId. That's it.
-       … (TEE runs exec-a, kernel gates + self-resumes, MPC signs,
-          kernel decodes the sig in-callback, TEE runs exec-b and broadcasts)
+       …  (kernel debits budget → quote_phase; TEE exec-quote fetches a REAL
+          1Click quote; onQuote gates amountIn==budget → status `funding`
+          → one ft_transfer_call to the quote's depositAddress — solvers
+          swap + deliver to the MPC-derived payer on Solana
+          → TEE runs exec-a, kernel gates + self-resumes, MPC signs,
+             kernel decodes the sig in-callback, TEE runs exec-b, broadcast)
        kernel2.settle(jobId, "1")                     // owner-only, after
                                                       // they see the Solana tx land
 ```
 
-### What happens inside callApi
+### Funding rail: 1Click (NEAR Intents' own cross-chain)
 
-1. Budget escrowed from the caller's credit (u128 math), job record written
-   (one storage key, status `exec_a`).
-2. Fires exec-a on OutLayer (`request_execution`, hash-pinned wasm from
-   GitHub) and chains `.then(onResult)` on the same batch. OutLayer's
-   yield/resume `value_return`s the exec output back into `onResult` as
-   `promiseResult(0)` — no event polling, no second call.
+At job time the kernel swaps its token credit for destination-chain funds,
+delivered **to the MPC-derived payer itself** — per job, or as one-time
+"arming" (the same primitive with a bigger amount):
+
+1. `exec-quote` (TEE, hash-pinned wasm) POSTs to
+   `https://1click.chaindefuser.com/v0/quote` through the fetch relay:
+   `swapType EXACT_INPUT`, `depositType ORIGIN_CHAIN`, origin USDC.near →
+   destination USDC (or native SOL) on Solana, `recipient` = derived payer,
+   `refundTo` = kernel2. No API key. Response is a **signed quote** with
+   `depositAddress` + `amountIn` + `minAmountOut`.
+2. `onQuote` (outlayer-yield callback) gates the quote —
+   `amountIn == escrowed budget`, address sanity — then fires **one**
+   `ft_transfer_call(depositAddress, amount)` plus exec-a, concurrently.
+3. 1Click's bonded solvers deliver; failure means the deposit is refunded
+   to kernel2's intents balance. No custom bridge code anywhere.
+4. Solver lag surfaces as job status `funding` — refundable, never lost:
+   exec-a re-checks the payer's Solana balance via RPC before paying.
+
+Trust ledger: kernel promise chain (escrow) + MPC (signing) + 1Click solvers
+(the one unavoidable leg — bonded, competitive) + TEE (fetch/quote).
+Verification stays in-path: no operator float, no indexer.
+
+Proven end-to-end in mock (`scripts/run_k2v23.sh`, near-mock + the **real
+1Click API**): NEP-141 credit 10M → callApi debit 1M → live quote
+(depositAddress, amountIn, minAmountOut) → `funding_started` → status
+`funding` → funding `ft_transfer_call` fired to the live depositAddress +
+exec-a requested → credit held 9M → `withdrawToken` refund to 0.
+
+Known cost: 1Click withdraw fee on small USDC→USDC pairs is heavy at tiny
+sizes (~28% on 1 USDC; amortizes with amount). Testnet twin token:
+`usdc.tkn-defuse.testnet`.
 
 ### The callback chain (all on-chain, all predecessor-gated)
 
 | Step | Who fires it | Predecessor at entry | Gate |
 |---|---|---|---|
+| `onQuote` | outlayer's yield resume (`.then` on exec-quote) | `outlayer.testnet` | `requireOutlayer()` + job in `quote_phase` |
 | `onResult` | outlayer's yield resume (`.then`) | `outlayer.testnet` | `requireOutlayer()` + job in `exec_a` |
 | `onSignDone` | the kernel's own `.then` on the sign promise | self (the scheduler) | `requireSelf()` + job in `sign_requested` |
 | (exec-b) | fired directly from `onSignDone` | — | no extra step |
+
+`callApi` internals: budget debited from the caller's **token credit**
+(`credittok:<user>`, u128), job written (status `quote_phase`), exec-quote
+requested with `.then(onQuote)`. `onQuote` gates the quote then flips to
+`funding` and fires the deposit + exec-a. From there the chain below is
+v2.2-identical.
 
 The v2.1 `sigUpload` method and the planned relay watcher are **deleted**:
 the signature rides the kernel's own promise chain.
@@ -99,9 +136,10 @@ completes and the loop closes at settle.
 
 | Receipt | Attaches / forwards | Headroom |
 |---|---|---|
-| `callApi` | EXEC 150 + CB_RESULT 145 = 295 | 5 (compiler-enforced static cap) |
+| `callApi` | EXEC 60 (exec-quote) + CB_QUOTE 230 = 290 | 10 (compiler-enforced static cap) |
+| `onQuote` | funding ft_transfer_call 10 + exec-a 60 + CB_RESULT 145 = 215 | ≤230 ✓ |
 | `onResult` | forwards SIGN 40 + CB_SIGN 100 = 140 | ~157 |
-| `onSignDone` | own work ~25 + forwards EXEC 60 | ~15 |
+| `onSignDone` | own work ~25 + forwards EXEC 60 (100+180=280 ≤300) | ✓ |
 | exec-b | 60 | ~57 |
 
 Actual burn for the whole tree ≈ 6–7 Tgas. Attached budgets are deliberate
@@ -134,21 +172,30 @@ contracts/
   tank.ts             tank coordinator (ledger + intents; refuses custody) — superseded
   inlayer_signer.ts   per-user MPC signer (path = caller+suffix; the proven signing leg)
   types/              lisp-rlm.d.ts ambient types for the TS frontend
-wasms/v4/             hash-pinned exec wasms (exec-a fetch/402-parse, exec-b broadcast)
+wasms/v4/             hash-pinned exec wasms (exec-a fetch/402-parse, exec-b broadcast,
+                      exec-quote 1Click quote — source: exec-quote.ts alongside)
+scripts/
+  run_k2v23.sh        v2.3 mock proof: credit → callApi → real 1Click quote →
+                      onQuote gates → funding + exec-a legs → withdrawToken
 tests/                near-mock scenarios + state-machine matrix
 docs/                 design + deploy history
 ```
 
 ## Trust boundaries
 
-- Money moves only through predecessor-gated lanes: `onResult` requires
-  OutLayer, `onSignDone` requires self.
-- The TEE can't steal: it only sees the *unsigned* message; the signature is
-  gated behind the payTo pin + budget cap inside the kernel.
+- Money moves only through predecessor-gated lanes: `onQuote`/`onResult`
+  require OutLayer, `onSignDone` requires self.
+- The TEE can't steal: it only fetches quotes and sends unsigned messages;
+  the funding destination and signature are gated inside the kernel
+  (amountIn == budget; payTo pin + budget cap).
 - The MPC can't redirect: it signs whatever bytes the kernel sends, and the
   kernel only sends output that passed the gates.
 - The relay is a byte pipe: it can drop (job stalls → refund) but can't
-  redirect.
+  redirect. The 1Click quote is signed by the solvers; a bogus quote fails
+  the `amountIn == budget` gate in `onQuote`.
+- Funding custody: tokens leave only via `ft_transfer_call` to a gated
+  quote's depositAddress with refundTo = the kernel; unsolved quotes refund
+  to kernel2's intents balance, never to a third party.
 - Signing paths compose from the **job registry** (`owner + "-" + suffix`),
   never from `predecessorAccountId()` — TEE-lane calls arrive with OutLayer
   as predecessor; registry binding pins the path to the payer.
@@ -184,10 +231,15 @@ before testing on-chain or the kernel hash-mismatches.
 - exec-a via fetch-relay on-chain: tx `9DQCDSbx…` (output 723 bytes, cost 0.0010734 N)
 - kernel2 v2.1 first full loop: tx `HaPNhkoG…` — one call → real TEE exec-a →
   gates → real MPC sign_done → job exec_b (relay sigUpload still used)
-- kernel2 **v2.2** (current, `6fd00ae`): relay watcher + sigUpload deleted;
+- kernel2 **v2.2** (`6fd00ae`): relay watcher + sigUpload deleted;
   onSignDone self-resumes. Full chain tx `FdARXQRb…`: sign_requested →
   sign_done (sig decoded in-contract) → broadcast_requested, exec-b executed;
   broadcast itself awaits a funded devnet payer
+- kernel2 **v2.3** (current, `966a1f2`): intents-funded jobs — token credit
+  via ft_on_transfer, callApi debits credit → quote_phase, TEE exec-quote
+  fetches a REAL 1Click quote, onQuote gates amountIn==budget → funding:
+  one ft_transfer_call to the live depositAddress + exec-a concurrently.
+  Mock-proven end-to-end (`scripts/run_k2v23.sh`); testnet deploy pending
 
 ## Types
 
