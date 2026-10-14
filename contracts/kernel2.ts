@@ -36,6 +36,19 @@ const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-ke
 const EXEC_A_HASH: string = "a42d8361e1b4211f2b8543ecde409f36e159a18752ec27c17a5661065365d464";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
 const EXEC_B_HASH: string = "0c35c3ea80cb1726d1155b2feca5f32d222f5fda9a2e85ad190563c327409e89";
+// ── v2.3: intents funding (1Click) ──
+// callApi now funds the derived payer per job: exec-quote (TEE) fetches a 1Click quote
+// (USDC.near → USDC@solana, recipient = payer, refundTo = self), onQuote gates it and
+// fires ONE ft_transfer_call to the quote's depositAddress. 1Click solvers deliver and
+// swap; refunds land in this contract's intents balance. Exec-a still checks the payer's
+// Solana balance before paying — solver lag surfaces as job status `funding`, refundable.
+const TOKEN_CONTRACT: string = "usdc.testtoken"; // mock FT; testnet twin: usdc.tkn-defuse.testnet; mainnet: bridged USDC
+const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
+const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
+const FT_GAS: number = 10000000000000;
+const CB_GAS_QUOTE: number = 230000000000000;
+// static caps per receipt (≤300): callApi 60+230=290 ✓; onQuote 10+60+145=215 ≤230 ✓;
+// onResult 40+100=140 ≤145 ✓; onSignDone 25+60=85 ≤100 ✓.
 
 // ── admin: pin the payTo per suffix (self only — the merchant table) ──
 export function pinPayTo(suffix: string, payTo58: string): void {
@@ -72,33 +85,113 @@ export function withdrawCredit(amount: string): void {
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"credit_withdrawn","data":{"user":"${caller}","amount":"${amt}"}}`);
 }
 
+// withdraw token credit: ft_transfer back to the caller (1 yocto attached per NEP-141)
+export function withdrawToken(amount: string): void {
+  const caller = near.predecessorAccountId();
+  const bal = near.storageGet("credittok:" + caller) ?? "0";
+  const overdraft = u128Sub(amount, bal);
+  const amt = u128Sub(amount, overdraft);
+  if (amt !== amount) { near.panic("insufficient token credit"); }
+  const rest = u128Sub(bal, amt);
+  if (rest === "0") { near.storageRemove("credittok:" + caller); } else { near.storageSet("credittok:" + caller, rest); }
+  const args = `{"receiver_id":"${caller}","amount":"${amt}"}`;
+  const p = near.promiseBatchCreate(TOKEN_CONTRACT);
+  near.promiseBatchActionFunctionCall(p, "ft_transfer", args, "1", FT_GAS);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"token_withdrawn","data":{"user":"${caller}","amount":"${amt}"}}`);
+}
+
+// ── v2.3: token credit — funded by ft_on_transfer (NEP-141) ──
+export function creditToken(): string {
+  return near.storageGet("credittok:" + near.predecessorAccountId()) ?? "0";
+}
+export function creditTokenOf(user: string): string {
+  return near.storageGet("credittok:" + user) ?? "0";
+}
+// NEP-141 receiver: token contract transfers in with msg = credit recipient.
+// Token identity = bare predecessor (never trust a nep141: string in msg).
+export function ft_on_transfer(sender_id: string, amount: string, msg: string): string {
+  if (near.predecessorAccountId() !== TOKEN_CONTRACT) { near.panic("token lane only"); }
+  if (amount === "0" || amount === "") { near.panic("zero deposit"); }
+  const who = (msg === "") ? sender_id : msg;
+  const prev = near.storageGet("credittok:" + who) ?? "0";
+  const total = u128Add(prev, amount);
+  near.storageSet("credittok:" + who, total);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"token_deposit","data":{"user":"${who}","amount":"${amount}","total":"${total}"}}`);
+  return "0";
+}
+
 // ── EMIT: the only entry an agent needs to start a job ──
 export function callApi(url: string, suffix: string, budget: string, payer58: string): string {
   const caller = near.predecessorAccountId();
   if (url === "" || strLen(url) > 256) { near.panic("bad url"); }
   if (suffix === "" || strLen(suffix) > 32) { near.panic("bad suffix"); }
-  if (strLen(payer58) > 48) { near.panic("bad payer"); }
+  if (strLen(payer58) !== 44) { near.panic("bad payer"); }
   if (near.storageGet("payto:" + suffix) === null) { near.panic("unpinned suffix"); }
-  const credit = near.storageGet("credit:" + caller) ?? "0";
-  if (u128Gt(budget, credit)) { near.panic("insufficient credit for budget"); }
-  if (u128Gt(EXEC_FEE, budget)) { near.panic("budget below exec fee"); }
+  const credit = near.storageGet("credittok:" + caller) ?? "0";
+  if (u128Gt(budget, credit)) { near.panic("insufficient token credit for budget"); }
+  if (u128Lt(budget, "1")) { near.panic("bad budget"); }
   const held = u128Sub(credit, budget);
-  if (held === "0") { near.storageRemove("credit:" + caller); } else { near.storageSet("credit:" + caller, held); }
+  if (held === "0") { near.storageRemove("credittok:" + caller); } else { near.storageSet("credittok:" + caller, held); }
   const jobId = sha256Hash(caller + ":" + url + ":" + toStr(near.blockHeight()) + ":" + near.randomSeed());
-  // ONE storage write at emit: the job record. No agent resume, no lastYield — outlayer's
-  // yield/resume delivers exec-a's output straight into onResult via promise_result.
-  const job = `{"owner":"${caller}","url":"${url}","suffix":"${suffix}","budget":"${budget}","payer":"${payer58}","jobId":"${jobId}","status":"exec_a"}`;
+  const job = `{"owner":"${caller}","url":"${url}","suffix":"${suffix}","budget":"${budget}","payer":"${payer58}","jobId":"${jobId}","status":"quote_phase"}`;
   near.storageSet("job:" + jobId, job);
-  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.1.0","event":"job_started","data":{"jobId":"${jobId}","owner":"${caller}","url":"${url}","budget":"${budget}"}}`);
-  // fire exec-a on outlayer; the contract's on_execution_response value_returns the output
-  // to this .then() — onResult runs with the exec-a msgHex as promiseResult(0).
-  const path = caller + "-" + suffix;
-  const input = `${jobId}|${url}|${path}|${payer58}`;
-  const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"job_started","data":{"jobId":"${jobId}","owner":"${caller}","url":"${url}","budget":"${budget}"}}`);
+  // funding phase: TEE fetches the 1Click quote (USDC.near → USDC@solana, recipient=payer);
+  // onQuote gates it and fires ft_transfer_call + exec-a concurrently.
+  const input = `${jobId}|${payer58}|${budget}`;
+  const args = `{"source":{"WasmUrl":{"url":"${EXEC_QUOTE_WASM}","hash":"${EXEC_QUOTE_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
-  near.promiseThen(p, near.currentAccountId(), "onResult", `{"jobId":"${jobId}"}`, "0", CB_GAS_RESULT);
+  near.promiseThen(p, near.currentAccountId(), "onQuote", `{"jobId":"${jobId}"}`, "0", CB_GAS_QUOTE);
   return jobId;
+}
+
+// slice an escaped-JSON string value: find "key\":\" … up to the escaped closing quote
+function sliceEscapedStr(j: string, key: string, maxLen: number): string {
+  const keyPos = strIndexOf(j, key);
+  if (keyPos < 0) { return ""; }
+  const colon = strIndexOf(strSlice(j, keyPos, keyPos + 24), ":");
+  if (colon < 0) { return ""; }
+  const valStart = keyPos + colon + 3; // skip :" (colon, quote, escape)
+  const closeRel = strIndexOf(strSlice(j, valStart, valStart + maxLen), "\\\"");
+  if (closeRel < 0) { return ""; }
+  return strSlice(j, valStart, valStart + closeRel);
+}
+
+// ── resumed via .then(): promiseResult(0) = exec-quote's output (escaped JSON) ──
+// Gates the 1Click quote, then fires BOTH legs concurrently: the ft_transfer_call to the
+// quote's deposit address (funding the payer via solvers) and exec-a (merchant fetch).
+// Exec-a re-checks the payer's on-chain balance — solver lag lands as status `funding`.
+export function onQuote(jobId: string): void {
+  requireOutlayer();
+  requireJob(jobId, "quote_phase");
+  const raw = near.storageGet("job:" + jobId) ?? "";
+  const respJson = near.promiseResult(0);
+  const addr = sliceEscapedStr(respJson, "depositAddress", 80);
+  const memo = sliceEscapedStr(respJson, "depositMemo", 64);
+  const amountIn = sliceEscapedStr(respJson, "amountIn", 40);
+  if (strLen(addr) < 20) { near.panic("no deposit address in quote"); }
+  if (strLen(amountIn) === 0) { near.panic("no amountIn in quote"); }
+  const budget = near.jsonGetStr("budget", raw) ?? "";
+  const owner = near.jsonGetStr("owner", raw) ?? "";
+  const suffix = near.jsonGetStr("suffix", raw) ?? "";
+  const payer = near.jsonGetStr("payer", raw) ?? "";
+  const path = owner + "-" + suffix;
+  // gate: the quoted input must be exactly what we escrowed — no over/under-spend
+  if (amountIn !== budget) { near.panic("quote amountIn != budget"); }
+  near.storageSet("jobquote:" + jobId, addr);
+  setJobStatus(jobId, "funding");
+  // leg 1: fund — USDC → 1Click escrow; solvers deliver to the payer (async, refundable)
+  const ftArgs = `{"receiver_id":"${addr}","amount":"${budget}","msg":"${memo}"}`;
+  const pf = near.promiseBatchCreate(TOKEN_CONTRACT);
+  near.promiseBatchActionFunctionCall(pf, "ft_transfer_call", ftArgs, "1", FT_GAS);
+  // leg 2: fetch — runs concurrently; its own balance check gates the payment
+  const input = `${jobId}|${near.jsonGetStr("url", raw) ?? ""}|${path}|${payer}`;
+  const args = `{"source":{"WasmUrl":{"url":"${EXEC_A_WASM}","hash":"${EXEC_A_HASH}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+  const pe = near.promiseBatchCreate(OUTLAYER_CONTRACT);
+  near.promiseBatchActionFunctionCall(pe, "request_execution", args, EXEC_FEE, EXEC_GAS);
+  near.promiseThen(pe, near.currentAccountId(), "onResult", `{"jobId":"${jobId}"}`, "0", CB_GAS_RESULT);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"funding_started","data":{"jobId":"${jobId}","depositAddress":"${addr}","amount":"${budget}"}}`);
 }
 
 // ── resumed via .then(): promiseResult(0) = exec-a's output (msgHex) ──
@@ -280,8 +373,8 @@ export function settle(jobId: string, resultOk: string): void {
     setJobStatus(jobId, "failed");
   }
   if (refund !== "0") {
-    const prev = near.storageGet("credit:" + owner) ?? "0";
-    near.storageSet("credit:" + owner, u128Add(prev, refund));
+    const prev = near.storageGet("credittok:" + owner) ?? "0";
+    near.storageSet("credittok:" + owner, u128Add(prev, refund));
   }
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"job_done","data":{"jobId":"${jobId}","ok":"${resultOk === "1" ? 1 : 0}","refunded":"${refund}"}}`);
 }
