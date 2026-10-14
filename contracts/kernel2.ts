@@ -30,9 +30,9 @@ const CB_GAS_SIGN: number = 20000000000000;
 const EXEC_GAS: number = 150000000000000;
 const EXEC_FEE: string = "4000010000000000000000";
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
-const EXEC_A_HASH: string = "93eee605e34b46cbd59349fa391ef796e0586bf8e15fd3b8fcb60a05583494d8";
+const EXEC_A_HASH: string = "148d0cb9e4872ff802f57e36daab6206980a7fd446a8e92f7ff37e96e4783515";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "7656077aa83aac99b9beddde38b5f5e05423924ce6af9befeaeb3d2bff0dfbd0";
+const EXEC_B_HASH: string = "0c35c3ea80cb1726d1155b2feca5f32d222f5fda9a2e85ad190563c327409e89";
 
 // ── admin: pin the payTo per suffix (self only — the merchant table) ──
 export function pinPayTo(suffix: string, payTo58: string): void {
@@ -144,11 +144,13 @@ export function onResult(jobId: string): void {
   near.storageSet("jobmsg:" + jobId, msgHex);
   near.storageSet("jobamt:" + jobId, amount);
   setJobStatus(jobId, "sign_requested");
+  near.log(`DBG status_now=${near.storageGet("job:" + jobId)}`);
   // MPC sign via raw promise batch (insigner's proven wire), callback to self
   const args = `{"request":{"payload_v2":{"Eddsa":"${msgHex}"},"path":"${path}","domain_id":1}}`;
   const p1 = near.promiseBatchCreate(MPC_CONTRACT);
   near.promiseBatchActionFunctionCall(p1, "sign", args, "1", SIGN_GAS);
   near.promiseThen(p1, near.currentAccountId(), "onSignDone", `{"jobId":"${jobId}"}`, "0", CB_GAS_SIGN);
+  near.log(`DBG onResult done`);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_requested","data":{"jobId":"${jobId}","path":"${path}","amount":"${amount}"}}`);
 }
 
