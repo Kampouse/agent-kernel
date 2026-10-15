@@ -38,8 +38,9 @@ const TOKEN_CONTRACT: string = "usdc.testnet"; // testnet USDC FT. 1Click is MAI
 // bridged USDC nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
 
 const SIGN_GAS: number = 40000000000000;
-const CB_GAS_RESULT: number = 145000000000000;
-const CB_GAS_SIGN: number = 100000000000000;
+const CB_GAS_RESULT: number = 200000000000000;
+const CB_GAS_SIGN: number = 150000000000000;
+const CB_GAS_EXECB: number = 60000000000000;
 const CB_GAS_QUOTE: number = 230000000000000;
 const EXEC_GAS: number = 60000000000000;
 const EXEC_FEE: string = "4000010000000000000000"; // outlayer payment per execution
@@ -164,6 +165,10 @@ export function onQuote(jobId: string): void {
   near.promiseBatchActionFunctionCall(pf, "ft_transfer_call", `{"receiver_id":"${addr}","amount":"${budget}","msg":"${memo}"}`, "1", FT_GAS);
   // leg 2: fetch — runs concurrently; exec-a's own payer-balance check gates payment
   const path = owner + "-" + suffix;
+  // funding is async + refundable; exec-a re-checks the payer balance before paying,
+  // so the state machine proceeds to exec_a immediately (v2.3 gap: nothing ever
+  // transitioned funding → exec_a, so onResult could never legally fire).
+  setJobStatus(jobId, "exec_a");
   requestWasmExecution(EXEC_A_WASM, EXEC_A_HASH, `${jobId}|${near.jsonGetStr("url", raw) ?? ""}|${path}|${payer}`, "onResult", jobId, CB_GAS_RESULT);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"funding_started","data":{"jobId":"${jobId}","depositAddress":"${addr}","amount":"${budget}"}}`);
 }
@@ -179,7 +184,7 @@ export function onResult(jobId: string): void {
   // heap can clobber the "job:"+jobId string still referenced below (observed in
   // near-mock: prefix bytes replaced by heap garbage mid-concat).
   const raw = near.storageGet("job:" + jobId) ?? "";
-  const msgHex = escapedField(respText(), "msgHex", 66);
+  const msgHex = escapedField(respText(), "msgHex", 296); // full 210-char hex msg + slack
   if (strLen(msgHex) < 100) { near.panic("bad msgHex in exec output"); }
   const owner = near.jsonGetStr("owner", raw) ?? "";
   const suffix = near.jsonGetStr("suffix", raw) ?? "";
@@ -216,9 +221,60 @@ export function onSignDone(jobId: string): void {
   near.storageSet("jobsig:" + jobId, sig58);
   setJobStatus(jobId, "broadcasting");
   const input = `${jobId}|${sig58}|${near.storageGet("jobmsg:" + jobId) ?? ""}`;
-  requestWasmExecution(EXEC_B_WASM, EXEC_B_HASH, input, "", "", 0);
+  requestWasmExecution(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_done","data":{"jobId":"${jobId}"}}`);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"broadcast_requested","data":{"jobId":"${jobId}"}}`);
+}
+
+// ── exec-b result → AUTO-SETTLE ──────────────────────────────────────────────
+// Outlayer yield-resume callback: predecessor = this contract (scheduler), same
+// semantics as onSignDone. exec-b v5 reports {"ok":true,"sig58":...,"slot":...}
+// after CONFIRMING the Solana tx via getSignatureStatuses. Settlement closes the
+// loop with no human in the middle; settle() remains as owner-only recovery for
+// genuinely stuck jobs (exec-b timeout / TEE unreachable).
+export function onExecBDone(jobId: string): void {
+  if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("outlayer lane only"); }
+  const raw = near.storageGet("job:" + jobId);
+  if (raw === null) { near.panic("unknown job"); }
+  const status = near.jsonGetStr("status", raw) ?? "";
+  if (status === "done" || status === "failed") { near.panic("already settled"); }
+  const owner = near.jsonGetStr("owner", raw) ?? "";
+  const budget = near.jsonGetStr("budget", raw) ?? "";
+  const out = respText();
+  const okAt = strIndexOf(out, "\"ok\":true");
+  let refund = budget;
+  if (okAt >= 0) {
+    // binding: the sig exec-b confirmed must be the one the MPC gave us
+    const confirmedSig = extractJsonStr(out, "sig58");
+    const ourSig = near.storageGet("jobsig:" + jobId) ?? "";
+    if (confirmedSig !== "" && ourSig !== "" && confirmedSig !== ourSig) {
+      near.panic("exec-b sig mismatch");
+    }
+    const amount = near.storageGet("jobamt:" + jobId) ?? "0";
+    if (u128Gt(amount, budget)) { near.panic("cost exceeds held budget"); }
+    refund = u128Sub(budget, amount);
+    setJobStatus(jobId, "done");
+  } else {
+    setJobStatus(jobId, "failed");
+  }
+  if (refund !== "0") {
+    near.storageSet("credittok:" + owner, u128Add(ledgerGet("credittok:", owner), refund));
+  }
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"job_done","data":{"jobId":"${jobId}","ok":"${okAt >= 0 ? 1 : 0}","refunded":"${refund}","auto":"1"}}`);
+}
+
+// extract "key":"value" from a raw (unescaped) JSON string
+function extractJsonStr(j: string, key: string): string {
+  const pat = strCat("\"", key, "\":\"");
+  const at = strIndexOf(j, pat);
+  if (at < 0) { return ""; }
+  const vs = at + strLen(pat);
+  let p = vs;
+  while (p < strLen(j)) {
+    if (strSlice(j, p, p + 1) == "\"") { return strSlice(j, vs, p); }
+    p = p + 1;
+  }
+  return "";
 }
 
 // ── SETTLE: owner-only, after the Solana tx is observable off-chain ───────────
