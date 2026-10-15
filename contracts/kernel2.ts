@@ -49,7 +49,7 @@ const FT_GAS: number = 10000000000000;
 // TEE workers: pinned by SHA-256, fetched by outlayer over GitHub raw (CDN lag ~2 min
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
-const EXEC_A_HASH: string = "8bd9ac9c59a971dcb5642d7addbc188889323b7ae62be9e7e03621e231801c6c";
+const EXEC_A_HASH: string = "88802e0c207c7eb8d3dd98f7f32f91b76cb44447eca5071ccd5151c6a480d300";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
 const EXEC_B_HASH: string = "5fefd387e37ad304f4825f5fec2ce9e3f243a362316ee4a228ff8f214da8aeb4";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
@@ -184,7 +184,9 @@ export function onResult(jobId: string): void {
   // heap can clobber the "job:"+jobId string still referenced below (observed in
   // near-mock: prefix bytes replaced by heap garbage mid-concat).
   const raw = near.storageGet("job:" + jobId) ?? "";
-  const msgHex = escapedField(respText(), "msgHex", 296); // full 210-char hex msg + slack
+  // payload is JSON-escaped JSON-in-JSON; jsonGetStrEsc unescapes then scans at any
+  // depth (plain-field scans miss the escaped key form — observed in near-mock 2026-10)
+  const msgHex = jsonGetStrEsc("msgHex", respText()) ?? "";
   if (strLen(msgHex) < 100) { near.panic("bad msgHex in exec output"); }
   const owner = near.jsonGetStr("owner", raw) ?? "";
   const suffix = near.jsonGetStr("suffix", raw) ?? "";

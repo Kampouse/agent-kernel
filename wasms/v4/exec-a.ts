@@ -110,8 +110,8 @@ function decDivModSmall(dec: string, divisor: number): string {
   return q;
 }
 
-function decToLeHex(dec: string): string {
-  // full bignum → little-endian hex bytes until zero (>= 32 bytes expected for keys)
+function decToBeHex(dec: string): string {
+  // full bignum → big-endian hex bytes until zero (matches kernel b58ToHex ordering)
   let v = dec;
   let hex = "";
   let guard = 0;
@@ -121,20 +121,21 @@ function decToLeHex(dec: string): string {
     const byte = DEC_REM;
     const hi = byte / 16;
     const lo = byte % 16;
-    hex = strCat(hex, strSlice(HEXD, hi, hi + 1), strSlice(HEXD, lo, lo + 1));
+    hex = strCat(strSlice(HEXD, hi, hi + 1), strSlice(HEXD, lo, lo + 1), hex);
     guard = guard + 1;
   }
   return hex;
 }
 
-// base58 → little-endian hex of the bignum value (leading '1' chars multiply by 1^k =
-// 0-bytes prepended in VALUE, handled naturally since value stays the same; the classic
-// leading-zero padding is added by the caller via zeroCount)
+// base58 → big-endian hex of the bignum value; leading '1' chars = leading zero bytes,
+// restored as 00-prefix here (base58 zero-padding convention)
 function b58LeHex(s: string): string {
   let dec = "0";
+  let zeros = 0;
   let k = 0;
   while (k < strLength(s)) {
     const ch = strSlice(s, k, k + 1);
+    if (k == zeros && ch == "1") { zeros = zeros + 1; }
     let val = -1;
     let t = 0;
     while (t < 58) {
@@ -145,12 +146,18 @@ function b58LeHex(s: string): string {
     dec = decMulAddSmall(dec, 58, val);
     k = k + 1;
   }
-  return decToLeHex(dec);
+  let hex = decToBeHex(dec);
+  while (zeros > 0 && strLength(hex) < 128) {
+    hex = strCat("00", hex);
+    zeros = zeros - 1;
+  }
+  return hex;
 }
 
 function zeroPad(hex: string, wantBytes: number): string {
+  // big-endian pad: zeros go on the LEFT (most significant side)
   let out = hex;
-  while (strLength(out) < wantBytes * 2) { out = strCat(out, "00"); }
+  while (strLength(out) < wantBytes * 2) { out = strCat("00", out); }
   return out;
 }
 
