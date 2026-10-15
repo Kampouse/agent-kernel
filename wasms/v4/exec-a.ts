@@ -127,6 +127,13 @@ function decToBeHex(dec: string): string {
   return hex;
 }
 
+function charVal(ch: string): number {
+  // strIndexOf, NOT a == scan: runtime-vs-runtime string == is unreliable in the P2
+  // gate (probe3: 'D' matched '2', 'j'/'J' failed self-match) — host str-index-of is
+  // byte-exact. Returns -1 when absent.
+  return strIndexOf(ALPHABET, ch);
+}
+
 // base58 → big-endian hex of the bignum value; leading '1' chars = leading zero bytes,
 // restored as 00-prefix here (base58 zero-padding convention)
 function b58LeHex(s: string): string {
@@ -136,12 +143,7 @@ function b58LeHex(s: string): string {
   while (k < strLength(s)) {
     const ch = strSlice(s, k, k + 1);
     if (k == zeros && ch == "1") { zeros = zeros + 1; }
-    let val = -1;
-    let t = 0;
-    while (t < 58) {
-      if (strSlice(ALPHABET, t, t + 1) == ch) { val = t; }
-      t = t + 1;
-    }
+    const val = charVal(ch);
     if (val < 0) { return ""; }
     dec = decMulAddSmall(dec, 58, val);
     k = k + 1;
@@ -223,15 +225,13 @@ export function run(input: string): string {
       Q, "rpc", Q, ":", Q, strSlice(bhResp, 0, 120), Q, "}");
   }
 
-  // 4. msg = 0x00 || payTo(32) || payer(32) || amount LE(8) || blockhash(32)
-  const payToHex = zeroPad(b58LeHex(payTo), 32);
-  const payerHex = zeroPad(b58LeHex(payer58), 32);
-  const bhHex = zeroPad(b58LeHex(blockhash), 32);
-  const amtHex = u64LeHex(amount);
-  if (strLength(payToHex) != 64 || strLength(payerHex) != 64 || strLength(bhHex) != 64) {
-    return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "b58 decode failed", Q, "}");
-  }
-  const msgHex = strCat("00", payToHex, payerHex, amtHex, bhHex);
+  // 4. msg payload — b58→bignum decode is UNRELIABLE in the P2 gate (char ==,
+  // strIndexOf and decimal-bignum chains all corrupt: probes 2026-10-15), so exec-a
+  // hands the RAW strings over and the KERNEL decodes via its b58ToHex. msgHex here is
+  // hexEncode(ASCII "0|payTo|amount|blockhash") — kernel onResult rebuilds the real
+  // binary msg itself from the validated fields.
+  const raw = strCat("0|", payTo, "|", amount, "|", blockhash, "|", payer58);
+  const msgHex = hexEncode(raw);
   return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
     Q, "free", Q, ":false,", Q, "payTo", Q, ":", Q, payTo, Q, ",",
     Q, "amount", Q, ":", Q, amount, Q, ",",

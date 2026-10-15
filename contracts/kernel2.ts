@@ -49,7 +49,7 @@ const FT_GAS: number = 10000000000000;
 // TEE workers: pinned by SHA-256, fetched by outlayer over GitHub raw (CDN lag ~2 min
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
-const EXEC_A_HASH: string = "88802e0c207c7eb8d3dd98f7f32f91b76cb44447eca5071ccd5151c6a480d300";
+const EXEC_A_HASH: string = "531f7ce9b62bbffa18310f21ca65d1bb6a836f5987749188b85125ef26c6a60f";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
 const EXEC_B_HASH: string = "5fefd387e37ad304f4825f5fec2ce9e3f243a362316ee4a228ff8f214da8aeb4";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
@@ -185,25 +185,41 @@ export function onResult(jobId: string): void {
   // near-mock: prefix bytes replaced by heap garbage mid-concat).
   const raw = near.storageGet("job:" + jobId) ?? "";
   // payload is JSON-escaped JSON-in-JSON; jsonGetStrEsc unescapes then scans at any
-  // depth (plain-field scans miss the escaped key form — observed in near-mock 2026-10)
+  // depth (plain-field scans miss the escaped key form — observed in near-mock 2026-10).
+  // exec-a hands over RAW payTo/amount/blockhash (b58→bignum is unreliable in the P2
+  // gate — probes 2026-10-15) as hexEncode("0|payTo|amount|blockhash|payer"); this
+  // contract decodes and re-validates everything itself.
   const msgHex = jsonGetStrEsc("msgHex", respText()) ?? "";
-  if (strLen(msgHex) < 100) { near.panic("bad msgHex in exec output"); }
+  if (strLen(msgHex) < 20) { near.panic("bad msgHex in exec output"); }
   const owner = near.jsonGetStr("owner", raw) ?? "";
   const suffix = near.jsonGetStr("suffix", raw) ?? "";
   const budget = near.jsonGetStr("budget", raw) ?? "";
   const path = owner + "-" + suffix;   // BINDING: from registry, never from predecessor
-  // gate 1: merchant pin — payTo bytes (1..33 of msgHex) must match the pinned payTo
+  // unhex → "0|payTo|amount|blockhash|payer58"
+  const payload = hexDecode(msgHex);
+  // gate 0: shape — must start "0|" and carry 5 fields
+  if (strSlice(payload, 0, 2) !== "0|") { near.panic("bad payload version"); }
+  // gate 1: merchant pin — kernel decodes BOTH sides with its own b58ToHex
   const pin58 = near.storageGet("payto:" + suffix) ?? "";
   if (pin58 === "") { near.panic("unpinned suffix"); }
-  if (strSlice(msgHex, 2, 66) !== b58ToHex(pin58)) { near.panic("payTo mismatch"); }
-  // gate 2: amount (bytes 65..73, LE u64) must be within budget
-  const amount = leHexToDec(strSlice(msgHex, 130, 146));
+  const f1 = strIndexOf(payload, "|");
+  const f2 = strIndexOf(strSlice(payload, f1 + 1, strLen(payload)), "|") + f1 + 1;
+  const f3 = strIndexOf(strSlice(payload, f2 + 1, strLen(payload)), "|") + f2 + 1;
+  const f4 = strIndexOf(strSlice(payload, f3 + 1, strLen(payload)), "|") + f3 + 1;
+  const payTo = strSlice(payload, f1 + 1, f2);
+  const amount = strSlice(payload, f2 + 1, f3);
+  const blockhash = strSlice(payload, f3 + 1, f4);
+  if (strLen(payTo) !== 44 || b58ToHex(payTo) !== b58ToHex(pin58)) { near.panic("payTo mismatch"); }
+  // gate 2: amount (decimal from the challenge) must be within budget
   if (u128Gt(amount, budget)) { near.panic("amount exceeds budget"); }
-  near.storageSet("jobmsg:" + jobId, msgHex);
+  // rebuild the binary msg the MPC signs: 00 || payTo(32) || payer(32) || amtLE(8) || bh(32)
+  const amtHex = decToLeHexU64(amount);
+  const msgBin = strCat("00", b58ToHex(payTo), b58ToHex(strSlice(payload, f4 + 1, strLen(payload))), amtHex, b58ToHex(blockhash));
+  near.storageSet("jobmsg:" + jobId, msgBin);
   near.storageSet("jobamt:" + jobId, amount);
   setJobStatus(jobId, "sign_requested");
   // MPC sign via raw promise batch (insigner's proven wire), callback to self
-  const args = `{"request":{"payload_v2":{"Eddsa":"${msgHex}"},"path":"${path}","domain_id":1}}`;
+  const args = `{"request":{"payload_v2":{"Eddsa":"${msgBin}"},"path":"${path}","domain_id":1}}`;
   const p1 = near.promiseBatchCreate(MPC_CONTRACT);
   near.promiseBatchActionFunctionCall(p1, "sign", args, "1", SIGN_GAS);
   near.promiseThen(p1, near.currentAccountId(), "onSignDone", `{"jobId":"${jobId}"}`, "0", CB_GAS_SIGN);
@@ -484,6 +500,20 @@ function leHexToDec(h: string): string {
     shift = shift + 1;
   }
   return toStr(n);
+}
+
+// decimal string → 8-byte little-endian hex (kernel-side mirror of the amount field;
+// amounts ≤ 2^53 so number math is exact)
+function decToLeHexU64(dec: string): string {
+  let v = parseInt(dec);
+  if (v < 0) { v = 0; }
+  let hex = "";
+  for (let b = 0; b < 8; b = b + 1) {
+    const byte = v % 256;
+    v = v / 256;
+    hex = hex + hexDigit(byte / 16) + hexDigit(byte % 16);
+  }
+  return hex;
 }
 function pow256(k: number): number {
   let r = 1;
