@@ -33,7 +33,7 @@
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const OUTLAYER_CONTRACT: string = "outlayer.testnet";
 const MPC_CONTRACT: string = "v1.signer-prod.testnet";
-const TOKEN_CONTRACT: string = "usdc.testnet"; // testnet USDC FT. 1Click is MAINNET-ONLY (no testnet
+const TOKEN_CONTRACT: string = "usdc.kampy.testnet"; // our fundable testnet FT (real NEP-141). 1Click is MAINNET-ONLY (no testnet
 // assets/solvers): the funding rail is only provable on mainnet. Mainnet token:
 // bridged USDC nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
 
@@ -51,7 +51,7 @@ const FT_GAS: number = 10000000000000;
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "a42d8361e1b4211f2b8543ecde409f36e159a18752ec27c17a5661065365d464";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "0c35c3ea80cb1726d1155b2feca5f32d222f5fda9a2e85ad190563c327409e89";
+const EXEC_B_HASH: string = "5fefd387e37ad304f4825f5fec2ce9e3f243a362316ee4a228ff8f214da8aeb4";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
