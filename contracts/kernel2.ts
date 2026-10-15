@@ -31,7 +31,7 @@
 //   callApi     60 + 230 = 290 ✓        onQuote   10 + 60 + 145 = 215 ≤ 230 ✓
 //   onResult    40 + 100 = 140 ≤ 145 ✓   onSignDone 25 + 60 = 85 ≤ 100 ✓
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-const OUTLAYER_CONTRACT: string = "outlayer.testnet";
+const OUTLAYER_CONTRACT: string = "outlayerlocal.testnet";
 const MPC_CONTRACT: string = "v1.signer-prod.testnet";
 const TOKEN_CONTRACT: string = "usdc.kampy.testnet"; // our fundable testnet FT (real NEP-141). 1Click is MAINNET-ONLY (no testnet
 // assets/solvers): the funding rail is only provable on mainnet. Mainnet token:
@@ -49,7 +49,7 @@ const FT_GAS: number = 10000000000000;
 // TEE workers: pinned by SHA-256, fetched by outlayer over GitHub raw (CDN lag ~2 min
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
-const EXEC_A_HASH: string = "a42d8361e1b4211f2b8543ecde409f36e159a18752ec27c17a5661065365d464";
+const EXEC_A_HASH: string = "8bd9ac9c59a971dcb5642d7addbc188889323b7ae62be9e7e03621e231801c6c";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
 const EXEC_B_HASH: string = "5fefd387e37ad304f4825f5fec2ce9e3f243a362316ee4a228ff8f214da8aeb4";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
