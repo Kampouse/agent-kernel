@@ -73,15 +73,15 @@ def main():
   let body = "";
   const PIN: string = "DhQPaqYLtgbpjreGhrP1jPXvvZ3u8Jz4fQ2NKJExCoDE";
   if (sid == "payto_swap") {
-    body = strCat("{\\\\"accepts\\\\":[{\\\\"payTo\\\\":\\\\"43chANgedPayeeAddrxxxxxxxxxxxxxxxQQQ\\\\",\\\\"amount\\\\":100}]}");
+    body = strCat("{\\"accepts\\":[{\\"network\\":\\\"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1\\",\\"payTo\\":\\"43chANgedPayeeAddrxxxxxxxxxxxxxxxQQQ\\",\\"amount\\":100}]}");
   } else if (sid == "amount_inflate") {
-    body = strCat("{\\\\"accepts\\\\":[{\\\\"payTo\\\\":\\\\"", PIN, "\\\\",\\\\"amount\\\\":999999}]}");
+    body = strCat("{\\"accepts\\":[{\\"network\\":\\\"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1\\",\\"payTo\\":\\"", PIN, "\\",\\"amount\\":999999}]}");
   } else if (sid == "amount_fractional") {
-    body = strCat("{\\\\"accepts\\\\":[{\\\\"payTo\\\\":\\\\"", PIN, "\\\\",\\\\"amount\\\\":99}]}");
+    body = strCat("{\\"accepts\\":[{\\"network\\":\\\"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1\\",\\"payTo\\":\\"", PIN, "\\",\\"amount\\":99}]}");
   } else if (sid == "bad_payer58") {
-    body = strCat("{\\\\"accepts\\\\":[{\\\\"payTo\\\\":\\\\"not_base58_garbage\\\\",\\\\"amount\\\\":100}]}");
+    body = strCat("{\\"accepts\\":[{\\"network\\":\\\"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1\\",\\"payTo\\":\\"not_base58_garbage\\",\\"amount\\":100}]}");
   } else {
-    body = strCat("{\\\\"accepts\\\\":[{\\\\"payTo\\\\":\\\\"", PIN, "\\\\",\\\\"amount\\\\":100}]}");
+    body = strCat("{\\"accepts\\":[{\\"network\\":\\\"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1\\",\\"payTo\\":\\"", PIN, "\\",\\"amount\\":100}]}");
   }
   const status = "402";
 '''
@@ -106,6 +106,14 @@ def main():
     k = k.replace(
         'const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";',
         f'const EXEC_A_WASM: string = "{HERE}/wasms/exec-a-range-fixture.wasm";')
+    # exec-b: pin the LOCAL build (GitHub still has the old bare-sig version)
+    import hashlib as _h
+    eb_hash = _h.sha256(open(f"{HOME}/dev/agent-kernel/wasms/v4/exec-b.wasm", "rb").read()).hexdigest()
+    k = k.replace(
+        'const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";',
+        f'const EXEC_B_WASM: string = "{HOME}/dev/agent-kernel/wasms/v4/exec-b.wasm";')
+    k = re.sub(r'const EXEC_B_HASH: string = "[0-9a-f]{64}";',
+               f'const EXEC_B_HASH: string = "{eb_hash}";', k)
     k = re.sub(r'const EXEC_A_HASH: string = "[0-9a-f]{64}";',
                f'const EXEC_A_HASH: string = "{fix_hash}";', k)
     assert fix_hash in k, "EXEC_A_HASH pin replace failed"

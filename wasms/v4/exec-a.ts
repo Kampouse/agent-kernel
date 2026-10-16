@@ -204,6 +204,15 @@ export function run(input: string): string {
 
   // 2. challenge: x402 v2 body, accepts[0] carries payTo + amount (number or string)
   let payTo = "";
+  // CAIP-2 network tag → cluster tag the kernel whitelists (genesis-hash ids)
+  let networkTag = "";
+  {
+    const netRaw = extractStr(body, "network");
+    if (strLength(netRaw) >= 39) {
+      if (strSlice(netRaw, 7, 39) === "EtWTRABZaYq6iMfeYKouRu166VU2xqa1") { networkTag = "devnet"; }
+      if (strSlice(netRaw, 7, 51) === "5eykt4UsFv8P8NJdTREpY1vzqKqZeK5mCkXGtsEQVG2N") { networkTag = "mainnet"; }
+    }
+  }
   let amount = "";
   if (status == "402") {
     payTo = extractStr(body, "payTo");
@@ -218,7 +227,8 @@ export function run(input: string): string {
 
   // 3. blockhash
   const bhBody = strCat("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getLatestBlockhash\",\"params\":[{\"commitment\":\"finalized\"}]}");
-  const bhResp = httpPost(BH_RPC, bhBody, "application/json");
+    const bhRpc: string = networkTag === "devnet" ? "https://api.devnet.solana.com" : "https://solana-rpc.publicnode.com";
+  const bhResp = httpPost(bhRpc, bhBody, "application/json");
   const blockhash = extractStr(bhResp, "blockhash");
   if (strLength(blockhash) != 44) {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "no blockhash", Q, ",",
@@ -236,5 +246,6 @@ export function run(input: string): string {
     Q, "free", Q, ":false,", Q, "payTo", Q, ":", Q, payTo, Q, ",",
     Q, "amount", Q, ":", Q, amount, Q, ",",
     Q, "blockhash", Q, ":", Q, blockhash, Q, ",",
+    Q, "network", Q, ":", Q, networkTag, Q, ",",
     Q, "msgHex", Q, ":", Q, msgHex, Q, "}");
 }

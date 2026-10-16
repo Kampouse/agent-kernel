@@ -33,6 +33,11 @@
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const OUTLAYER_CONTRACT: string = "outlayerlocal.testnet";
 const MPC_CONTRACT: string = "v1.signer-prod.testnet";
+// MPC-derived ed25519 pubkey (hex, 64 chars). Pinned to the honest-signer test
+// key for the devnet lane; the real MPC derive replaces this (same slot, key
+// derived from MPL path "kernel-<jobId>"). Address on Solana:
+// 7A8K8xWVejU68WQojRAkmabz5x3X5SdKMo237vAvAW9U
+const MPC_PUBKEY_HEX: string = "5b7c9e0a7d30f4ac601bb798bfdd1c44a0c670ee6b8eb75e27ef80ac2acd1f97";
 const TOKEN_CONTRACT: string = "usdc.kampy.testnet"; // our fundable testnet FT (real NEP-141). 1Click is MAINNET-ONLY (no testnet
 // assets/solvers): the funding rail is only provable on mainnet. Mainnet token:
 // bridged USDC nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
@@ -51,7 +56,7 @@ const FT_GAS: number = 10000000000000;
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "531f7ce9b62bbffa18310f21ca65d1bb6a836f5987749188b85125ef26c6a60f";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "5fefd387e37ad304f4825f5fec2ce9e3f243a362316ee4a228ff8f214da8aeb4";
+const EXEC_B_HASH: string = "f0f789ef6fe8aec30b71875ed580a3b70331d11e25a8bba61055b488ce950f28";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
@@ -225,9 +230,29 @@ export function onResult(jobId: string): void {
   if (strLen(payTo) !== 44 || b58ToHex(payTo) !== b58ToHex(pin58)) { rejectJob(jobId, owner, budget, "payTo mismatch"); return; }
   // gate 2: amount (decimal from the challenge) must be within budget
   if (u128Gt(amount, budget)) { rejectJob(jobId, owner, budget, "amount exceeds budget"); return; }
-  // rebuild the binary msg the MPC signs: 00 || payTo(32) || payer(32) || amtLE(8) || bh(32)
+  // cluster: exec-a echoes the challenge's CAIP-2 network (accepts[0].network)
+  // as a short tag. Whitelist — unknown tag → reject: never silently broadcast
+  // to a cluster the merchant didn't name (mainnet send on a devnet job = real
+  // funds at risk).
+  const cluster = jsonGetStrEsc("network", respText()) ?? "";
+  near.log("DBG cluster=[" + cluster + "] respTail=[" + strSlice(respText(), 180, 260) + "]");
+  if (cluster !== "devnet" && cluster !== "mainnet") { rejectJob(jobId, owner, budget, "unknown solana cluster"); return; }
+  near.storageSet("jobnet:" + jobId, cluster);
+  // REAL Solana legacy tx MESSAGE (what MPC actually signs; exec-b prepends the
+  // sig vec and broadcasts): header(3) || keysVec || bh(32) || instrVec.
+  //   header: numReqSigs=1, numReadonlySigned=0, numReadonlyUnsigned=1
+  //   keys:   02 || MPC pubkey(32) [fee payer, signer] || payTo(32) [readonly dest]
+  //   instr:  01 || progIdIdx=2 (System) || 02 accts || idx 00,01 || dataLen=12
+  //           || u32 LE tag 2 (Transfer) || lamports u64 LE
   const amtHex = decToLeHexU64(amount);
-  const msgBin = strCat("00", b58ToHex(payTo), b58ToHex(strSlice(payload, f4 + 1, strLen(payload))), amtHex, b58ToHex(blockhash));
+  const msgBin = strCat(
+    "010001",
+    "03", MPC_PUBKEY_HEX, b58ToHex(payTo),
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    b58ToHex(blockhash),
+    "01", "02", "02", "0001", "0c", "02000000", amtHex
+  );
+  near.log("DBG msgBinLen=" + toStr(strLen(msgBin)) + " head=[" + strSlice(msgBin, 0, 20) + "] tail=[" + strSlice(msgBin, strLen(msgBin) - 20, strLen(msgBin)) + "]");
   near.storageSet("jobmsg:" + jobId, msgBin);
   near.storageSet("jobamt:" + jobId, amount);
   setJobStatus(jobId, "sign_requested");
@@ -251,7 +276,7 @@ export function onSignDone(jobId: string): void {
   if (sig58 === "") { near.panic("sig encode failed"); }
   near.storageSet("jobsig:" + jobId, sig58);
   setJobStatus(jobId, "broadcasting");
-  const input = `${jobId}|${sig58}|${near.storageGet("jobmsg:" + jobId) ?? ""}`;
+  const input = `${jobId}|${sig58}|${near.storageGet("jobmsg:" + jobId) ?? ""}|${near.storageGet("jobnet:" + jobId) ?? ""}`;
   requestWasmExecution(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_done","data":{"jobId":"${jobId}"}}`);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"broadcast_requested","data":{"jobId":"${jobId}"}}`);
@@ -272,6 +297,7 @@ export function onExecBDone(jobId: string): void {
   const owner = near.jsonGetStr("owner", raw) ?? "";
   const budget = near.jsonGetStr("budget", raw) ?? "";
   const out = respText();
+  near.log("DBG execB=[" + out + "]");
   const okAt = strIndexOf(out, "\"ok\":true");
   let refund = budget;
   if (okAt >= 0) {
@@ -448,14 +474,16 @@ function b58ToHex(s: string): string {
 
 // 64 raw bytes (hex string) → base58; same digit-array scheme, base 58
 function b58EncodeBytes(hexSig: string): string {
-  const bytes: number[] = [];
+  // P2 surface arrays never grow past their literal (push past ~64 also
+  // unreliable at runtime) — preallocate every cell, track len manually.
+  const bytes: number[] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
   for (let i = 0; i < 64; i = i + 1) {
     const hi = hexNibble(strSlice(hexSig, i * 2, i * 2 + 1));
     const lo = hexNibble(strSlice(hexSig, i * 2 + 1, i * 2 + 2));
     if (hi < 0 || lo < 0) { return ""; }
-    bytes.push(hi * 16 + lo);
+    bytes[i] = hi * 16 + lo;
   }
-  const digits: number[] = [0];
+  const digits: number[] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
   let dlen = 1;
   for (let i = 0; i < 64; i = i + 1) {
     let carry = bytes[i];
@@ -464,7 +492,7 @@ function b58EncodeBytes(hexSig: string): string {
       digits[j] = x % 58;
       carry = (x - digits[j]) / 58;
     }
-    while (carry > 0) { digits.push(carry % 58); dlen = dlen + 1; carry = (carry - digits[dlen - 1]) / 58; }
+    while (carry > 0) { digits[dlen] = carry % 58; dlen = dlen + 1; carry = (carry - digits[dlen - 1]) / 58; }
   }
   let out = "";
   for (let i = dlen - 1; i >= 0; i = i - 1) {
