@@ -1,0 +1,21 @@
+[package]
+name = "honest-signer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ed25519-dalek = { version = "2", default-features = false }
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+
+# Undefined extern "C" symbols become env.* imports (wasm-ld default namespace).
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=--allow-undefined",
+  "-C", "link-arg=--import-undefined",
+]

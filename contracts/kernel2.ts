@@ -464,7 +464,7 @@ function b58EncodeBytes(hexSig: string): string {
       digits[j] = x % 58;
       carry = (x - digits[j]) / 58;
     }
-    while (carry > 0) { digits[dlen] = carry % 58; dlen = dlen + 1; carry = (carry - digits[dlen - 1]) / 58; }
+    while (carry > 0) { digits.push(carry % 58); dlen = dlen + 1; carry = (carry - digits[dlen - 1]) / 58; }
   }
   let out = "";
   for (let i = dlen - 1; i >= 0; i = i - 1) {
