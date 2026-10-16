@@ -183,11 +183,12 @@ def payto_swap(serve, daemon):
     trap, out = submit_job("payto_swap")
     check("payto_swap: job accepted (attack visible only to kernel)", trap is not True)
     drive()
-    text = wait_events(log, need=["sign_requested"])
+    text = wait_events(log, need=["job_done"])
     check("payto_swap: no signature ever requested", "sign_requested" not in text)
-    check("payto_swap: kernel rejected the challenge (onResult trap)",
-          "bad msgHex" in text or "TRAPPED" in text)
-    print("    ⚠ FINDING: gate-failure trap leaves budget escrowed — no refund on pin mismatch")
+    check("payto_swap: job rejected with reason", "job_rejected" in text)
+    check("payto_swap: budget refunded (no escrow leak)",
+          '"refunded":"1000000"' in text)
+    check("payto_swap: no trap (clean reject)", "TRAPPED" not in text)
 
 @scenario
 def amount_inflate(serve, daemon):

@@ -221,6 +221,29 @@ function parseSigBytes(j: string): string {
   return hex;
 }
 
+function setJobFields(jobId: string, status: string, body: string): void {
+  near.storageSet("job:" + jobId, body.slice(0, strLen(body) - 1) + `,"status":"${status}"}`);
+}
+
+function setJobStatus(jobId: string, status: string): void {
+  const raw = near.storageGet("job:" + jobId) ?? "";
+  const owner = near.jsonGetStr("owner", raw) ?? "";
+  const url = near.jsonGetStr("url", raw) ?? "";
+  const suffix = near.jsonGetStr("suffix", raw) ?? "";
+  const budget = near.jsonGetStr("budget", raw) ?? "";
+  const payer = near.jsonGetStr("payer", raw) ?? "";
+  setJobFields(jobId, status, jobJson(owner, url, suffix, budget, payer));
+}
+
+function rejectJob(jobId: string, owner: string, budget: string, reason: string): void {
+  setJobStatus(jobId, "failed");
+  if (budget !== "0" && budget !== "") {
+    near.storageSet("credittok:" + owner, u128Add(ledgerGet("credittok:", owner), budget));
+  }
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"job_rejected","data":{"jobId":"${jobId}","reason":"${reason}"}}`);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"job_done","data":{"jobId":"${jobId}","ok":"0","refunded":"${budget}","auto":"1"}}`);
+}
+
 function requestWasmExecution(wasmUrl: string, hash: string, input: string, callback: string, jobId: string, cbGas: number): void {
   const args = `{"source":{"WasmUrl":{"url":"${wasmUrl}","hash":"${hash}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
@@ -243,20 +266,6 @@ function requireOutlayer(): void {
 
 function respText(): string {
   return near.promiseResult(0);
-}
-
-function setJobFields(jobId: string, status: string, body: string): void {
-  near.storageSet("job:" + jobId, body.slice(0, strLen(body) - 1) + `,"status":"${status}"}`);
-}
-
-function setJobStatus(jobId: string, status: string): void {
-  const raw = near.storageGet("job:" + jobId) ?? "";
-  const owner = near.jsonGetStr("owner", raw) ?? "";
-  const url = near.jsonGetStr("url", raw) ?? "";
-  const suffix = near.jsonGetStr("suffix", raw) ?? "";
-  const budget = near.jsonGetStr("budget", raw) ?? "";
-  const payer = near.jsonGetStr("payer", raw) ?? "";
-  setJobFields(jobId, status, jobJson(owner, url, suffix, budget, payer));
 }
 
 function setLedger(prefix: string, who: string, v: string): void {
@@ -377,6 +386,12 @@ export function onQuote(jobId: string): void {
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"funding_started","data":{"jobId":"${jobId}","depositAddress":"${addr}","amount":"${budget}"}}`);
 }
 
+// ── REJECT: gate failure → close the job, refund the full budget ─────────────
+// Panicking here would leave the budget escrowed forever (the credittok debit
+// happened back in callApi — a separate committed tx). Reject closes the loop:
+// mark failed, refund, emit job_done. The caller RETURNS after calling this.
+
+
 // ── merchant fetch result → MPC sign ──────────────────────────────────────────
 // promiseResult(0) = exec-a's output, JSON-escaped. msgHex = the Solana transfer
 // instruction the TEE built: byte 0 = instruction tag, 1..33 = payTo, 65..73 = LE u64 amount.
@@ -388,24 +403,24 @@ export function onResult(jobId: string): void {
   // heap can clobber the "job:"+jobId string still referenced below (observed in
   // near-mock: prefix bytes replaced by heap garbage mid-concat).
   const raw = near.storageGet("job:" + jobId) ?? "";
+  const owner = near.jsonGetStr("owner", raw) ?? "";
+  const suffix = near.jsonGetStr("suffix", raw) ?? "";
+  const budget = near.jsonGetStr("budget", raw) ?? "";
   // payload is JSON-escaped JSON-in-JSON; jsonGetStrEsc unescapes then scans at any
   // depth (plain-field scans miss the escaped key form — observed in near-mock 2026-10).
   // exec-a hands over RAW payTo/amount/blockhash (b58→bignum is unreliable in the P2
   // gate — probes 2026-10-15) as hexEncode("0|payTo|amount|blockhash|payer"); this
   // contract decodes and re-validates everything itself.
   const msgHex = jsonGetStrEsc("msgHex", respText()) ?? "";
-  if (strLen(msgHex) < 20) { near.panic("bad msgHex in exec output"); }
-  const owner = near.jsonGetStr("owner", raw) ?? "";
-  const suffix = near.jsonGetStr("suffix", raw) ?? "";
-  const budget = near.jsonGetStr("budget", raw) ?? "";
+  if (strLen(msgHex) < 20) { rejectJob(jobId, owner, budget, "bad msgHex"); return; }
   const path = owner + "-" + suffix;   // BINDING: from registry, never from predecessor
   // unhex → "0|payTo|amount|blockhash|payer58"
   const payload = hexDecode(msgHex);
   // gate 0: shape — must start "0|" and carry 5 fields
-  if (strSlice(payload, 0, 2) !== "0|") { near.panic("bad payload version"); }
+  if (strSlice(payload, 0, 2) !== "0|") { rejectJob(jobId, owner, budget, "bad payload version"); return; }
   // gate 1: merchant pin — kernel decodes BOTH sides with its own b58ToHex
   const pin58 = near.storageGet("payto:" + suffix) ?? "";
-  if (pin58 === "") { near.panic("unpinned suffix"); }
+  if (pin58 === "") { rejectJob(jobId, owner, budget, "unpinned suffix"); return; }
   const f1 = strIndexOf(payload, "|");
   const f2 = strIndexOf(strSlice(payload, f1 + 1, strLen(payload)), "|") + f1 + 1;
   const f3 = strIndexOf(strSlice(payload, f2 + 1, strLen(payload)), "|") + f2 + 1;
@@ -413,9 +428,9 @@ export function onResult(jobId: string): void {
   const payTo = strSlice(payload, f1 + 1, f2);
   const amount = strSlice(payload, f2 + 1, f3);
   const blockhash = strSlice(payload, f3 + 1, f4);
-  if (strLen(payTo) !== 44 || b58ToHex(payTo) !== b58ToHex(pin58)) { near.panic("payTo mismatch"); }
+  if (strLen(payTo) !== 44 || b58ToHex(payTo) !== b58ToHex(pin58)) { rejectJob(jobId, owner, budget, "payTo mismatch"); return; }
   // gate 2: amount (decimal from the challenge) must be within budget
-  if (u128Gt(amount, budget)) { near.panic("amount exceeds budget"); }
+  if (u128Gt(amount, budget)) { rejectJob(jobId, owner, budget, "amount exceeds budget"); return; }
   // rebuild the binary msg the MPC signs: 00 || payTo(32) || payer(32) || amtLE(8) || bh(32)
   const amtHex = decToLeHexU64(amount);
   const msgBin = strCat("00", b58ToHex(payTo), b58ToHex(strSlice(payload, f4 + 1, strLen(payload))), amtHex, b58ToHex(blockhash));
