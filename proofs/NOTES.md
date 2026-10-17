@@ -125,3 +125,16 @@ Working architecture (all files in /tmp/bend-x402/):
   the reference. Moved refused above main: main→refused() now checks AND runs
   (prints None{}). Also: checker refuses a lying main annotation (Maybe<True>
   vs body Maybe<False>) — caught my own test bug, good sign.
+
+## Session 5b: meta.bend — the framework question, verified empirically
+- Half 1 (tactic engine as library): REAL. Deep embedding works end-to-end:
+  P syntax (PTrue/PLe/PAnd) -> Interp : P -> Type -> generic
+  auto(p) -> Maybe<Interp(p)> checks AND runs (Some{({==},{==},Unit{})};
+  one false conjunct -> None{}). Computed goal families in generic
+  signatures are accepted — the load-bearing capability.
+- Half 2 (Meta-F* powers): ABSENT, checker-confirmed. `match A` on a
+  Type param: "a - scrutinee matches only in a dead region". No quote,
+  no unify API, no elab hooks; templates = closed syntax inlining.
+- `bend --verdict` exists (Lean-formalized kernel, bendtt.lean) but needs
+  lean v4.34.0 via elan — not installed here; fell back to the standard
+  checker with a clean error (no silent trust lie).
