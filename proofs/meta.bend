@@ -14,19 +14,13 @@ import Base
 # type arguments take parens F<(A & B)>.
 # ============================================================
 
-
-# ============================================================
-# VERIFY: can userland Bend host a proof framework (Meta-F*-style)?
-# Half 1 POC: props as DATA, interpret -> Type, tactic = total fn
-# ============================================================
-
-# embedded proposition syntax (deep embedding)
+# ---- embedded proposition syntax ----
 type P is Data:
   PTrue{}
   PLe{a: Nat, b: Nat}
   PAnd{l: P, r: P}
 
-# interpretation: syntax -> real Bend proposition types
+# ---- interpretation: syntax -> real Bend proposition types ----
 def Interp(p: P) -> Type:
   match p:
     case PTrue{}:
@@ -36,7 +30,7 @@ def Interp(p: P) -> Type:
     case PAnd{l, r}:
       Interp(l) & Interp(r)
 
-# decider pieces for the PLe leaf (from agent-kernel tactics.bend)
+# ---- decider pieces for the PLe leaf (as in tactics.bend) ----
 def zero_le(q: Nat) -> {Nat.is_le(0n, q) == True{} : Bool}:
   match q:
     case 0n:
@@ -55,6 +49,7 @@ def prove_le(a: Nat, b: Nat) -> Maybe<{Nat.is_le(a, b) == True{} : Bool}>:
         case 1n+q:
           prove_le(p, q)
 
+# and-case helper (a computed value needs its own def to be matched)
 def auto_and(-l: P, -r: P, ml: Maybe<Interp(l)>, mr: Maybe<Interp(r)>) -> Maybe<(Interp(l) & Interp(r))>:
   match ml:
     case Some{wl}:
@@ -66,9 +61,9 @@ def auto_and(-l: P, -r: P, ml: Maybe<Interp(l)>, mr: Maybe<Interp(r)>) -> Maybe<
     case None{}:
       None{}
 
-# THE TACTIC: one total function over syntax, returning Maybe<proof>
-# THE KEY QUESTION: does the checker accept a GENERIC def whose return
-# type is a computed family (Maybe<Interp(p)>)?
+# ---- THE TACTIC: one total function over syntax -> Maybe<proof> ----
+# Signature uses a computed type family as the generic goal — the
+# load-bearing capability for any userland tactic framework.
 def auto(p: P) -> Maybe<Interp(p)>:
   match p:
     case PTrue{}:
@@ -78,14 +73,13 @@ def auto(p: P) -> Maybe<Interp(p)>:
     case PAnd{l, r}:
       auto_and(l, r, auto(l), auto(r))
 
-# positive: conjunction of provable props
-def pos() -> Maybe<Interp(PAnd{PLe{2n, 5n}, PLe{9n, 5n}})>:
-  auto(PAnd{PLe{2n, 5n}, PLe{9n, 5n}})
+# positive: conjunction of provable props -> Some{({==}, {==}, Unit{})}
+def pos() -> Maybe<Interp(PAnd{PLe{2n, 5n}, PAnd{PLe{0n, 9n}, PTrue{}}})>:
+  auto(PAnd{PLe{2n, 5n}, PAnd{PLe{0n, 9n}, PTrue{}}})
 
-# negative: one unprovable conjunct refuses the whole goal
+# negative: one unprovable conjunct refuses the whole goal -> None{}
 def neg() -> Maybe<Interp(PAnd{PLe{2n, 5n}, PLe{9n, 5n}})>:
   auto(PAnd{PLe{2n, 5n}, PLe{9n, 5n}})
-
 
 def main() -> Maybe<Interp(PAnd{PLe{2n, 5n}, PAnd{PLe{0n, 9n}, PTrue{}}})>:
   pos()
