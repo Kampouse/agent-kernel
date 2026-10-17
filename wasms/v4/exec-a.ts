@@ -17,6 +17,49 @@ const HEXD: string = "0123456789abcdef";
 const DIGITS9: string = "0123456789";
 let DEC_REM: number = 0;
 
+function pow2(n: number): number {
+  let r = 1;
+  while (n > 0) { r = r * 2; n = n - 1; }
+  return r;
+}
+
+const B64A: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const PRINTABLE: string = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+
+const RPC: string = "https://solana-rpc.publicnode.com";
+const HEXD: string = "0123456789abcdef";
+const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const B64A: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const RELAY_URL: string = "https://fetch-relay.kj95hgdgnn.workers.dev";
+const RELAY_X402: string = "https://fetch-relay.kj95hgdgnn.workers.dev/x402";
+const ZERO_SIG: string = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+function b64decode(s: string): string {
+  let out = "";
+  let acc = 0;
+  let bits = 0;
+  for (let i = 0; i < strLen(s); i = i + 1) {
+    const ch = strSlice(s, i, i + 1);
+    // NOTE: no `ch == "="` and no strIndexOf-'=' probe here — both poison this
+    // loop in the P2 gate (d8/d13/d14 probes: loop emits nothing). '=' padding
+    // only trails the b64; strIndexOf skips unknown chars anyway.
+    const v = B64A.indexOf(ch);
+    if (v < 0) { continue; }
+    acc = acc * 64 + v;
+    bits = bits + 6;
+    if (bits >= 8) {
+      bits = bits - 8;
+      const pw = pow2(bits);
+      const byteVal = acc / pw;
+      acc = acc % pw;
+      // strCat, NOT `+`: concat-by-plus inside this loop yields "" in the P2
+      // gate (d13 probe) — strCat is the only proven form (d11 probe).
+      out = strCat(out, strSlice(PRINTABLE, byteVal % 256 - 32, byteVal % 256 - 32 + 1));
+    }
+  }
+  return out;
+}
+
 function extractStr(j: string, key: string): string {
   const Q: string = strSlice("\"x", 0, 1);
   const pat = strCat(Q, key, Q, ":", Q);
@@ -189,6 +232,7 @@ export function run(input: string): string {
   const jobId = p[0] ?? "";
   const url = p[1] ?? "";
   const payer58 = p[3] ?? "";
+  const srcAta58 = p[4] ?? "";
   if (strSlice(url, 0, 8) != "https://") {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "https only", Q, "}");
   }
@@ -196,39 +240,87 @@ export function run(input: string): string {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "bad payer", Q, "}");
   }
 
-  // 1. fetch the merchant endpoint via relay (GET)
-  const req = strCat("{", Q, "url", Q, ":", Q, url, Q, "}");
-  const resp = httpPost(RELAY, req, "application/json");
-  const status = extractNum(resp, "status");
-  const body = relayBody(resp);
+  // 1. challenge: DIRECT merchant GET, challenge rides the payment-required
+  // response header — read via httpGetHdr (lisp-rlm wasi:http fields.get
+  // capture, added 2026-10-17). NO RELAY on this leg anymore.
+  const chalB64 = httpGetHdr(url, "payment-required");
+  if (strLength(chalB64) < 40) {
+    return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
+      Q, "error", Q, ":", Q, "no challenge header", Q, "}");
+  }
+  // P2 gate cannot b64-decode reliably (probed 2026-10-17) — but the DECODED
+  // challenge JSON is ALSO available: retry the GET and parse the decoded
+  // header the merchant ALSO sends? No — decode here via the gate b64decode
+  // fails; instead parse the BASE64-decoded fields via exec-b's decoder...
+  // Pragmatic: the challenge JSON fields (payTo/amount/feePayer/asset/
+  // network) are inside the b64. The gate b64decode works for SHORT inputs;
+  // 1084-char fails. So parse what we can from b64-decoded HEAD: the JSON
+  // is deterministic (x402Version first). Use the gate's b64decode on
+  // chunks: 1084 = 8×135+4 → decode in 8 slices of 132 chars (multiple of 4)
+  // and concatenate — avoids the corrupt whole-string decode.
+  let chalText = "";
+  {
+    const CHUNK: number = 132;
+    let off = 0;
+    let guard = 0;
+    while (off < strLength(chalB64) && guard < 16) {
+      const end = off + CHUNK < strLength(chalB64) ? off + CHUNK : strLength(chalB64);
+      chalText = strCat(chalText, b64decode(strSlice(chalB64, off, end)));
+      off = end;
+      guard = guard + 1;
+    }
+  }
+  // challenge header (b64) rides the relay's headers{} — exec-b needs it verbatim
+  // for the PAYMENT-SIGNATURE retry (resource + accepted blocks must match).
 
   // 2. challenge: x402 v2 body, accepts[0] carries payTo + amount (number or string)
   let payTo = "";
   // CAIP-2 network tag → cluster tag the kernel whitelists (genesis-hash ids)
   let networkTag = "";
   {
-    const netRaw = extractStr(body, "network");
+    const netRaw = extractStr(chalText, "network");
     if (strLength(netRaw) >= 39) {
       if (strSlice(netRaw, 7, 39) === "EtWTRABZaYq6iMfeYKouRu166VU2xqa1") { networkTag = "devnet"; }
       if (strSlice(netRaw, 7, 51) === "5eykt4UsFv8P8NJdTREpY1vzqKqZeK5mCkXGtsEQVG2N") { networkTag = "mainnet"; }
     }
   }
   let amount = "";
-  if (status == "402") {
-    payTo = extractStr(body, "payTo");
-    amount = extractNum(body, "amount");
-    if (strLength(amount) == 0) { amount = extractStr(body, "amount"); }
-  }
+  let feePayer = "";
+  let mint = "";
+  // direct-GET lane: challenge header present = payment required
+  payTo = extractStr(chalText, "payTo");
+  amount = extractNum(chalText, "amount");
+  if (strLength(amount) == 0) { amount = extractStr(chalText, "amount"); }
+  feePayer = extractStr(chalText, "feePayer");
+  mint = extractStr(chalText, "asset");
   if (strLength(payTo) != 44) {
+    // no payable challenge → report free with the resource body
+    const body = httpGet(url);
     return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
-      Q, "free", Q, ":true,", Q, "status", Q, ":", Q, status, Q, ",",
+      Q, "free", Q, ":true,", Q, "status", Q, ":", Q, "200", Q, ",",
       Q, "body", Q, ":", Q, strSlice(body, 0, 200), Q, "}");
+  }
+  // x402 exact-SVM requires the facilitator's feePayer; without it the v0 lane
+  // cannot build a co-signable tx. Missing feePayer = unusable challenge.
+  if (strLength(feePayer) != 44) {
+    return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
+      Q, "error", Q, ":", Q, "no feePayer in challenge", Q, "}");
+  }
+  if (strLength(mint) != 44) {
+    return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
+      Q, "error", Q, ":", Q, "no asset(mint) in challenge", Q, "}");
   }
 
   // 3. blockhash
   const bhBody = strCat("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getLatestBlockhash\",\"params\":[{\"commitment\":\"finalized\"}]}");
-    const bhRpc: string = networkTag === "devnet" ? "https://api.devnet.solana.com" : "https://solana-rpc.publicnode.com";
-  const bhResp = httpPost(bhRpc, bhBody, "application/json");
+  // Literal-URL if-chain: a ternary-built URL string routes httpPost to the
+  // dynamic host import (local inlayer rejects it with "https urls only").
+  let bhResp: string = "";
+  if (networkTag == "mainnet") {
+    bhResp = httpPost("https://solana-rpc.publicnode.com", bhBody, "application/json");
+  } else {
+    bhResp = httpPost("https://api.devnet.solana.com", bhBody, "application/json");
+  }
   const blockhash = extractStr(bhResp, "blockhash");
   if (strLength(blockhash) != 44) {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "no blockhash", Q, ",",
@@ -238,14 +330,22 @@ export function run(input: string): string {
   // 4. msg payload — b58→bignum decode is UNRELIABLE in the P2 gate (char ==,
   // strIndexOf and decimal-bignum chains all corrupt: probes 2026-10-15), so exec-a
   // hands the RAW strings over and the KERNEL decodes via its b58ToHex. msgHex here is
-  // hexEncode(ASCII "0|payTo|amount|blockhash") — kernel onResult rebuilds the real
-  // binary msg itself from the validated fields.
-  const raw = strCat("0|", payTo, "|", amount, "|", blockhash, "|", payer58);
+  // hexEncode(ASCII "0|payTo|amount|blockhash|payer|feePayer|mint|srcAta") — kernel onResult
+  // rebuilds the real v0 binary msg itself from the validated fields.
+  const raw = strCat("0|", payTo, "|", amount, "|", blockhash, "|", payer58, "|", feePayer, "|", mint, "|", srcAta58);
   const msgHex = hexEncode(raw);
-  return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
-    Q, "free", Q, ":false,", Q, "payTo", Q, ":", Q, payTo, Q, ",",
-    Q, "amount", Q, ":", Q, amount, Q, ",",
-    Q, "blockhash", Q, ":", Q, blockhash, Q, ",",
-    Q, "network", Q, ":", Q, networkTag, Q, ",",
-    Q, "msgHex", Q, ":", Q, msgHex, Q, "}");
+  // P2 gate: ONE big strCat call truncates ~292 chars with varied content
+  // (probed 2026-10-17). Incremental accumulation (loop-proven pattern,
+  // b64decode grew 813 chars fine) sidesteps it.
+  let out: string = strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",");
+  out = strCat(out, Q, "free", Q, ":false,", Q, "payTo", Q, ":", Q, payTo, Q, ",");
+  out = strCat(out, Q, "amount", Q, ":", Q, amount, Q, ",");
+  out = strCat(out, Q, "blockhash", Q, ":", Q, blockhash, Q, ",");
+  out = strCat(out, Q, "feePayer", Q, ":", Q, feePayer, Q, ",");
+  out = strCat(out, Q, "mint", Q, ":", Q, mint, Q, ",");
+  out = strCat(out, Q, "srcAta", Q, ":", Q, srcAta58, Q, ",");
+  out = strCat(out, Q, "network", Q, ":", Q, networkTag, Q, ",");
+  out = strCat(out, Q, "chalB64", Q, ":", Q, chalB64, Q, ",");
+  out = strCat(out, Q, "msgHex", Q, ":", Q, msgHex, Q, "}");
+  return out;
 }

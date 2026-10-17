@@ -38,12 +38,17 @@ const MPC_CONTRACT: string = "v1.signer-prod.testnet";
 // derived from MPL path "kernel-<jobId>"). Address on Solana:
 // 7A8K8xWVejU68WQojRAkmabz5x3X5SdKMo237vAvAW9U
 const MPC_PUBKEY_HEX: string = "5b7c9e0a7d30f4ac601bb798bfdd1c44a0c670ee6b8eb75e27ef80ac2acd1f97";
+// SPL Token / Memo / ComputeBudget program ids (hex). Chain-verified from a landed
+// devnet TransferChecked settlement (x402 lane, 2026-10); library-cross-checked.
+const TOKEN_PROG_HEX: string = "06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9";
+const MEMO_PROG_HEX: string = "054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d";
+const CU_PROG_HEX: string = "0306466fe5211732ffecadba72c39be7bc8ce5bbc5f7126b2c439b3a40000000";
 const TOKEN_CONTRACT: string = "usdc.kampy.testnet"; // our fundable testnet FT (real NEP-141). 1Click is MAINNET-ONLY (no testnet
 // assets/solvers): the funding rail is only provable on mainnet. Mainnet token:
 // bridged USDC nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
 
 const SIGN_GAS: number = 40000000000000;
-const CB_GAS_RESULT: number = 200000000000000;
+const CB_GAS_RESULT: number = 300000000000000;
 const CB_GAS_SIGN: number = 150000000000000;
 const CB_GAS_EXECB: number = 60000000000000;
 const CB_GAS_QUOTE: number = 230000000000000;
@@ -54,9 +59,9 @@ const FT_GAS: number = 10000000000000;
 // TEE workers: pinned by SHA-256, fetched by outlayer over GitHub raw (CDN lag ~2 min
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
-const EXEC_A_HASH: string = "531f7ce9b62bbffa18310f21ca65d1bb6a836f5987749188b85125ef26c6a60f";
+const EXEC_A_HASH: string = "b941d8bc4e1c3936584b03bb133fe17cbee0d3d6e9a5902828b0fd0380c91d64";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "f0f789ef6fe8aec30b71875ed580a3b70331d11e25a8bba61055b488ce950f28";
+const EXEC_B_HASH: string = "db7fd7d8496b23dd26c77511b086f5777b893ddd4a6fe2ecd7857d8152c56308";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
@@ -64,14 +69,28 @@ const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4
 // jobamt:<id>, credit:<account> (NEAR), credittok:<account> (FT).
 
 // ── admin: merchant registry ──────────────────────────────────────────────────
-export function pinPayTo(suffix: string, payTo58: string): void {
+export function pinPayTo(suffix: string, payTo58: string, dstAta58: string, mint58: string): void {
   if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("self only"); }
   if (suffix === "" || strLen(suffix) > 32) { near.panic("bad suffix"); }
   if (strLen(payTo58) !== 44) { near.panic("bad payTo"); }
+  // dest ATA + mint: PDAs can't be derived on-chain (b58 bignum unreliable in the
+  // P2 gate) — they're constants of (payTo, mint), pinned by the operator at
+  // registry time and verified off-chain before pinning.
+  if (strLen(dstAta58) !== 44) { near.panic("bad dstAta"); }
+  if (strLen(mint58) !== 44) { near.panic("bad mint"); }
   near.storageSet("payto:" + suffix, payTo58);
+  near.storageSet("paytoata:" + suffix, dstAta58);
+  near.storageSet("paytomint:" + suffix, mint58);
 }
 export function payToOf(suffix: string): string {
   return near.storageGet("payto:" + suffix) ?? "";
+}
+// Payer-side source ATA: PDA(payer, mint) — can't derive on-chain (b58 bignum),
+// pinned per payer by the operator (verified off-chain) before jobs use it.
+export function pinSrcAta(payer58: string, srcAta58: string): void {
+  if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("self only"); }
+  if (strLen(payer58) !== 44 || strLen(srcAta58) !== 44) { near.panic("bad pin args"); }
+  near.storageSet("srcata:" + payer58, srcAta58);
 }
 
 // ── NEAR escrow ledger ────────────────────────────────────────────────────────
@@ -174,7 +193,9 @@ export function onQuote(jobId: string): void {
   // so the state machine proceeds to exec_a immediately (v2.3 gap: nothing ever
   // transitioned funding → exec_a, so onResult could never legally fire).
   setJobStatus(jobId, "exec_a");
-  requestWasmExecution(EXEC_A_WASM, EXEC_A_HASH, `${jobId}|${near.jsonGetStr("url", raw) ?? ""}|${path}|${payer}`, "onResult", jobId, CB_GAS_RESULT);
+  const srcAta = near.storageGet("srcata:" + payer) ?? "";
+  if (srcAta === "") { near.panic("payer srcAta unpinned"); }
+  requestWasmExecution(EXEC_A_WASM, EXEC_A_HASH, `${jobId}|${near.jsonGetStr("url", raw) ?? ""}|${path}|${payer}|${srcAta}`, "onResult", jobId, CB_GAS_RESULT);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"funding_started","data":{"jobId":"${jobId}","depositAddress":"${addr}","amount":"${budget}"}}`);
 }
 
@@ -224,9 +245,24 @@ export function onResult(jobId: string): void {
   const f2 = strIndexOf(strSlice(payload, f1 + 1, strLen(payload)), "|") + f1 + 1;
   const f3 = strIndexOf(strSlice(payload, f2 + 1, strLen(payload)), "|") + f2 + 1;
   const f4 = strIndexOf(strSlice(payload, f3 + 1, strLen(payload)), "|") + f3 + 1;
+  const f5 = strIndexOf(strSlice(payload, f4 + 1, strLen(payload)), "|") + f4 + 1;
+  const f6 = strIndexOf(strSlice(payload, f5 + 1, strLen(payload)), "|") + f5 + 1;
+  const f7 = strIndexOf(strSlice(payload, f6 + 1, strLen(payload)), "|") + f6 + 1;
   const payTo = strSlice(payload, f1 + 1, f2);
   const amount = strSlice(payload, f2 + 1, f3);
   const blockhash = strSlice(payload, f3 + 1, f4);
+  const payer58 = strSlice(payload, f4 + 1, f5);
+  const feePayer = strSlice(payload, f5 + 1, f6);
+  const mint = strSlice(payload, f6 + 1, f7);
+  const srcAta = strSlice(payload, f7 + 1, strLen(payload));
+  if (strLen(feePayer) !== 44 || strLen(mint) !== 44 || strLen(srcAta) !== 44) {
+    rejectJob(jobId, owner, budget, "bad challenge fields"); return;
+  }
+  if (b58ToHex(payer58) !== MPC_PUBKEY_HEX) { rejectJob(jobId, owner, budget, "payer not MPC key"); return; }
+  const dstAta = near.storageGet("paytoata:" + suffix) ?? "";
+  const pinMint = near.storageGet("paytomint:" + suffix) ?? "";
+  if (dstAta === "" || pinMint === "") { rejectJob(jobId, owner, budget, "incomplete merchant pin"); return; }
+  if (b58ToHex(mint) !== b58ToHex(pinMint)) { rejectJob(jobId, owner, budget, "mint mismatch vs pin"); return; }
   if (strLen(payTo) !== 44 || b58ToHex(payTo) !== b58ToHex(pin58)) { rejectJob(jobId, owner, budget, "payTo mismatch"); return; }
   // gate 2: amount (decimal from the challenge) must be within budget
   if (u128Gt(amount, budget)) { rejectJob(jobId, owner, budget, "amount exceeds budget"); return; }
@@ -238,26 +274,49 @@ export function onResult(jobId: string): void {
   near.log("DBG cluster=[" + cluster + "] respTail=[" + strSlice(respText(), 180, 260) + "]");
   if (cluster !== "devnet" && cluster !== "mainnet") { rejectJob(jobId, owner, budget, "unknown solana cluster"); return; }
   near.storageSet("jobnet:" + jobId, cluster);
-  // REAL Solana legacy tx MESSAGE (what MPC actually signs; exec-b prepends the
-  // sig vec and broadcasts): header(3) || keysVec || bh(32) || instrVec.
-  //   header: numReqSigs=1, numReadonlySigned=0, numReadonlyUnsigned=1
-  //   keys:   02 || MPC pubkey(32) [fee payer, signer] || payTo(32) [readonly dest]
-  //   instr:  01 || progIdIdx=2 (System) || 02 accts || idx 00,01 || dataLen=12
-  //           || u32 LE tag 2 (Transfer) || lamports u64 LE
+  // REAL x402 exact-SVM v0 tx MESSAGE (what MPC signs; exec-b assembles the
+  // partial wire [zeroSig(feePayer) + ourSig] + version byte and POSTS it as
+  // PAYMENT-SIGNATURE — the FACILITATOR co-signs as fee payer and settles):
+  //   header: numReqSigs=2, roSigned=0, roUnsigned=4
+  //   keys 8: feePayer(RW,sig) payer(RO,sig) srcATA(RW) dstATA(RW)
+  //           mint(RO) tokenProg(RO) memoProg(RO) cuProg(RO)
+  //   ixs:    CUlimit(60000) | CUprice(1000) | TransferChecked(amt,6) | Memo(nonce)
+  //   MPC payload = "80" + msgHex (v0 version byte is INSIDE the signed bytes).
   const amtHex = decToLeHexU64(amount);
+  // Byte-verified against solders MessageV0 ground truth AND the facilitator-
+  // accepted landed settlement tx (devnet, 2026-10). Layout:
+  //   hdr 02 01 04 || 8 keys: feePayer payer dstATA srcATA cu memo token mint
+  //   || blockhash32 || 4 ixs: CUlimit(cu) CUprice(cu) TransferChecked(token)
+  //   Memo(memo, 16B zero nonce) || trailing 00 (present in both references).
+  // MPC payload = "80" + msgHex — the v0 version byte is INSIDE the signed bytes.
   const msgBin = strCat(
-    "010001",
-    "03", MPC_PUBKEY_HEX, b58ToHex(payTo),
-    "0000000000000000000000000000000000000000000000000000000000000000",
+    "020104", "08",
+    b58ToHex(feePayer), MPC_PUBKEY_HEX,
+    b58ToHex(dstAta), b58ToHex(srcAta),
+    CU_PROG_HEX, MEMO_PROG_HEX, TOKEN_PROG_HEX, b58ToHex(mint),
     b58ToHex(blockhash),
-    "01", "02", "02", "0001", "0c", "02000000", amtHex
+    "04",
+      "04", "00", "05", "0260ea0000",
+      "04", "00", "09", "03e803000000000000",
+      "06", "04", "03", "07", "02", "01", "0a", "0c", amtHex, "06",
+      // memo nonce MUST vary per tx: all-zero memo = identical tx bytes across
+      // jobs → the facilitator's replay filter 402s every payment after the
+      // first (probed 2026-10-17: pay.py w/ random memo → 200; zero memo → 402).
+      // jobId is unique per job — spread its chars across the 16 nonce bytes.
+      "05", "00", "10", nonceOf(jobId), "00"
   );
   near.log("DBG msgBinLen=" + toStr(strLen(msgBin)) + " head=[" + strSlice(msgBin, 0, 20) + "] tail=[" + strSlice(msgBin, strLen(msgBin) - 20, strLen(msgBin)) + "]");
   near.storageSet("jobmsg:" + jobId, msgBin);
+  // challenge b64 (from exec-a via relay headers) — exec-b reuses it verbatim in
+  // PAYMENT-SIGNATURE so the facilitator sees an unmodified resource/accepted pair.
+  const chalB64 = jsonGetStrEsc("chalB64", respText()) ?? "";
+  near.storageSet("jobchal:" + jobId, chalB64);
   near.storageSet("jobamt:" + jobId, amount);
   setJobStatus(jobId, "sign_requested");
   // MPC sign via raw promise batch (insigner's proven wire), callback to self
-  const args = `{"request":{"payload_v2":{"Eddsa":"${msgBin}"},"path":"${path}","domain_id":1}}`;
+  // MPC signs "80" + msg — the v0 version byte is part of the signed message bytes
+  // (proven: facilitator rejects sigs computed without it).
+  const args = `{"request":{"payload_v2":{"Eddsa":"80${msgBin}"},"path":"${path}","domain_id":1}}`;
   const p1 = near.promiseBatchCreate(MPC_CONTRACT);
   near.promiseBatchActionFunctionCall(p1, "sign", args, "1", SIGN_GAS);
   near.promiseThen(p1, near.currentAccountId(), "onSignDone", `{"jobId":"${jobId}"}`, "0", CB_GAS_SIGN);
@@ -276,7 +335,11 @@ export function onSignDone(jobId: string): void {
   if (sig58 === "") { near.panic("sig encode failed"); }
   near.storageSet("jobsig:" + jobId, sig58);
   setJobStatus(jobId, "broadcasting");
-  const input = `${jobId}|${sig58}|${near.storageGet("jobmsg:" + jobId) ?? ""}|${near.storageGet("jobnet:" + jobId) ?? ""}`;
+  // exec-b input: jobId|sig58|msgHex|cluster|resourceUrl — the x402 lane POSTs the
+  // partial tx to the merchant URL (not an RPC broadcast).
+  const jobRaw = near.storageGet("job:" + jobId) ?? "";
+  const jobUrl = near.jsonGetStr("url", jobRaw) ?? "";
+  const input = `${jobId}|${sig58}|${near.storageGet("jobmsg:" + jobId) ?? ""}|${near.storageGet("jobnet:" + jobId) ?? ""}|${jobUrl}|${near.storageGet("jobchal:" + jobId) ?? ""}`;
   requestWasmExecution(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_done","data":{"jobId":"${jobId}"}}`);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"broadcast_requested","data":{"jobId":"${jobId}"}}`);
@@ -442,6 +505,20 @@ function setLedger(prefix: string, who: string, v: string): void {
 const DIGITS: string = "0123456789";
 const HEXD: string = "0123456789abcdef";
 
+// 16-byte memo nonce from jobId: byte i = (i*7 + jobIdLen) % 256 — deterministic
+// per job, distinct across jobs (jobId length + position mix), no randomness
+// needed on-chain. Zero never appears at position 0 (jobIdLen >= 1).
+function nonceOf(jobId: string): string {
+  const n = strLen(jobId);
+  let hex = "";
+  let i = 0;
+  while (i < 16) {
+    const b = i * 7 + n;
+    hex = strCat(hex, strSlice(HEXD, b / 16, b / 16 + 1), strSlice(HEXD, b % 16, b % 16 + 1));
+    i = i + 1;
+  }
+  return hex;
+}
 // base58 (32-byte pubkey) → big-endian hex; MSB-first digits array
 function b58ToHex(s: string): string {
   // P2 arrays never grow past their literal length — preallocate 64 cells, track len manually
