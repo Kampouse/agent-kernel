@@ -120,6 +120,8 @@ Working architecture (all files in /tmp/bend-x402/):
   bogus LeZero in the impossible case → rejected; family lie → rejected;
   prove_le(9n,5n) → None{} runtime; repo matrix re-run: x402/payto check,
   fake.bend correctly FAILS (hand-fake), evil pair → None.
-- Quirk: def main() -> <Maybe-proof type> calling a def that returns it was
-  rejected as "unfilled law" — calling prove_le directly is fine; kept refused()
-  as a standalone (uncalled) def instead.
+- Quirk RESOLVED: "unfilled law" on main→refused() was FILE ORDER, not laws —
+  bend elaborates defs in order; a def referenced by live code must sit ABOVE
+  the reference. Moved refused above main: main→refused() now checks AND runs
+  (prints None{}). Also: checker refuses a lying main annotation (Maybe<True>
+  vs body Maybe<False>) — caught my own test bug, good sign.

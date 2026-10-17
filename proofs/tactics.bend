@@ -65,13 +65,16 @@ def prove_le(a: Nat, b: Nat) -> Maybe<{Nat.is_le(a, b) == True{} : Bool}>:
 # matches on BOTH args, so is_le(0n, q) is stuck while q is a variable —
 # the match refines q so each branch reduces to {==}.
 
+# negative demo: 9 > 5 — evaluates to None{} (honest refusal).
+# NOTE: defined ABOVE main — bend elaborates in file order; a def referenced
+# by live code must appear above the reference, else "unfilled law" (misleading
+# error; it just means not-yet-defined at that point).
+def refused() -> Maybe<{Nat.is_le(9n, 5n) == True{} : Bool}>:
+  prove_le(9n, 5n)
+
 # ---- demos ----
 def main() -> Maybe<{Nat.is_le(5n, 9n) == True{} : Bool}>:
   prove_le(5n, 9n)
-
-# negative demo: 9 > 5 — typechecks, evaluates to None{} (honest refusal)
-def refused() -> Maybe<{Nat.is_le(9n, 5n) == True{} : Bool}>:
-  prove_le(9n, 5n)
 
 # ============================================================
 # THE BRIDGE — structural order witness, computed like Word(n)
