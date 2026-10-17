@@ -99,3 +99,27 @@ Working architecture (all files in /tmp/bend-x402/):
      function ARG of type {long form} does not auto-coerce to its
      {short normal form} in all positions — passing it to a def whose
      param is the literal normal form DID work (mc.bend).
+
+## Session 5: tactics.bend — THE BRIDGE (is_le == True ⟷ order)
+- Fixed the soundness gap: tactic proved `{is_le(a,b)==True}` (a Bool fact),
+  not an order. Now bridged via a COMPUTATIONAL INDEXED FAMILY, base.bend's
+  Word.Nil/Word.Con pattern:
+  `type Le.LZ (LeZero)` + `type Le.LS<a,b> (LeSucc{prior: Le(a,b)})` +
+  `def Le(a,b) -> Data` computing on indices — **Le(1n+p, 0n) IS Empty**:
+  the relation itself refutes, decider not involved.
+- le_sound (decider→witness) & le_complete (witness→decider): same
+  identity-threading/absurd plumbing as auto_le — px : {False==True} in the
+  impossible case; w : Empty IS the contradiction in complete. + Laws
+  le_sound_law / le_complete_law as kernel gates. prove_le_witness: full
+  pipeline tactic → eq-proof → witness (needs +a/+b — affine double-use).
+- Gotchas hit: family def must return Data (Type rejected in field position,
+  Empty is Data so fine); +binder reuse for double consumption; zero_le's
+  match on q is LOAD-BEARING (Nat.cmp matches both args → is_le(0n,q) stuck
+  on variable q).
+- Verified on bend 2.0.37 (arm64): all proofs check; sabotage matrix —
+  bogus LeZero in the impossible case → rejected; family lie → rejected;
+  prove_le(9n,5n) → None{} runtime; repo matrix re-run: x402/payto check,
+  fake.bend correctly FAILS (hand-fake), evil pair → None.
+- Quirk: def main() -> <Maybe-proof type> calling a def that returns it was
+  rejected as "unfilled law" — calling prove_le directly is fine; kept refused()
+  as a standalone (uncalled) def instead.
