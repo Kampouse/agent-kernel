@@ -242,14 +242,68 @@ function x402settle(Q: string, jobId: string, sig58: string, msgHex: string,
   let accepted0 = "";
   if (aAt >= 0) {
     const aStart = aAt + strLen("\"accepts\":[");
-    const aEnd = strIndexOf(strSlice(chal, aStart, strLen(chal)), "}");
-    if (aEnd >= 0) { accepted0 = strSlice(chal, aStart, aStart + aEnd + 1); }
+    // brace-depth match: accepts[0] contains NESTED objects (extra{})
+    let depth = 0;
+    let p = aStart;
+    while (p < strLen(chal)) {
+      const ch = strSlice(chal, p, p + 1);
+      if (ch == "{") { depth = depth + 1; }
+      if (ch == "}") {
+        depth = depth - 1;
+        if (depth == 0) { accepted0 = strSlice(chal, aStart, p + 1); break; }
+      }
+      p = p + 1;
+    }
   }
   const txB64 = b64OfHex(wireHex);
   const payment = strCat("{\"x402Version\":2,\"resource\":", resource,
     ",\"accepted\":", accepted0,
     ",\"payload\":{\"transaction\":\"", txB64, "\"}}");
-  const paymentB64 = b64OfStr(payment);
+  // strCat result -> helper fn reads stale buffer (nil-poisoning class);
+  // re-slice to force a fresh string binding (proven workaround).
+  // b64OfStr's internal strLen aliases a stale length on large strings.
+  // Chunk explicitly (unrolled — for-loop scope breaks the TS frontend).
+  const paymentS = strSlice(payment, 0, strLen(payment));
+  // Deterministic path: ASCII -> hex (scanIdx lookup per char), then
+  // the hex->b64 encoder (b64OfHex) that has been byte-exact on every
+  // run (it produced the accepted tx b64 all session).
+  // strCat accumulation aliases a stale buffer beyond ~1000 chars.
+  // Re-bind (strSlice) the accumulator every 240 chars to force a
+  // fresh string slot; 240 is a multiple of 3 and of 2 (hex pairing).
+  // strLen on accumulated strings aliases stale lengths (proven: 1474
+  // char string read back as 1473/367). b64OfHex trusts strLen → wrong.
+  // Fix: explicit-length b64. Build b64 directly from payment chars:
+  // 3 ASCII chars -> 4 b64 chars, remainder via pad-and-trim.
+  let paymentB64 = "";
+  const plen = strLen(paymentS);
+  let bi = 0;
+  while (bi + 3 <= plen) {
+    const c0 = scanIdx(PRINTABLE, strSlice(paymentS, bi, bi + 1)) + 32;
+    const c1 = scanIdx(PRINTABLE, strSlice(paymentS, bi + 1, bi + 2)) + 32;
+    const c2 = scanIdx(PRINTABLE, strSlice(paymentS, bi + 2, bi + 3)) + 32;
+    paymentB64 = strCat(paymentB64,
+      strSlice(B64A, c0 / 4, c0 / 4 + 1),
+      strSlice(B64A, (c0 % 4) * 16 + c1 / 16, (c0 % 4) * 16 + c1 / 16 + 1),
+      strSlice(B64A, (c1 % 16) * 4 + c2 / 64, (c1 % 16) * 4 + c2 / 64 + 1),
+      strSlice(B64A, c2 % 64, c2 % 64 + 1));
+    bi = bi + 3;
+  }
+  const rem = plen - bi;
+  if (rem == 1) {
+    const c0 = scanIdx(PRINTABLE, strSlice(paymentS, bi, bi + 1)) + 32;
+    const c1 = 0;
+    paymentB64 = strCat(paymentB64,
+      strSlice(B64A, c0 / 4, c0 / 4 + 1),
+      strSlice(B64A, (c0 % 4) * 16, (c0 % 4) * 16 + 1), "AA");
+  }
+  if (rem == 2) {
+    const c0 = scanIdx(PRINTABLE, strSlice(paymentS, bi, bi + 1)) + 32;
+    const c1 = scanIdx(PRINTABLE, strSlice(paymentS, bi + 1, bi + 2)) + 32;
+    paymentB64 = strCat(paymentB64,
+      strSlice(B64A, c0 / 4, c0 / 4 + 1),
+      strSlice(B64A, (c0 % 4) * 16 + c1 / 16, (c0 % 4) * 16 + c1 / 16 + 1),
+      strSlice(B64A, (c1 % 16) * 4, (c1 % 16) * 4 + 1), "A");
+  }
   // httpGetWithHeader is literal-URL (static core family) — the x402
   // resource is fixed per build; fall back to the input URL only as a
   // sanity check.
@@ -304,7 +358,7 @@ function b64OfHex(hex: string): string {
       strSlice(B64A, c % 64, c % 64 + 1));
     i = i + 3;
   }
-  return strCat(out, "|", toStr(strLen(out)));
+  return out;
 }
 
 // ASCII string -> base64
@@ -316,9 +370,9 @@ function b64OfStr(s: string): string {
     const ch0 = s.charAt(i);
     const ch1 = s.charAt(i + 1);
     const ch2 = s.charAt(i + 2);
-    const v0 = PRINTABLE.indexOf(ch0);
-    const v1 = PRINTABLE.indexOf(ch1);
-    const v2 = PRINTABLE.indexOf(ch2);
+    const v0 = scanIdx(PRINTABLE, ch0);
+    const v1 = scanIdx(PRINTABLE, ch1);
+    const v2 = scanIdx(PRINTABLE, ch2);
     const c0 = v0 + 32;
     const c1 = v1 + 32;
     const c2 = v2 + 32;
