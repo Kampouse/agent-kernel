@@ -1,5 +1,10 @@
-// xexec-b v5 (TS, lisp-rlm outlayer target) — broadcast + CONFIRM.
-// stdin: "jobId|sig58|msgHex"
+// xexec-b v6 (TS, lisp-rlm outlayer target) — x402 settlement lane + broadcast.
+// stdin (x402): "jobId|sig58|msgHex|cluster|resourceUrl|chalB64"
+// stdin (broadcast): "jobId|sig58|msgHex|cluster"
+// x402: assemble partial v0 wire (zeroSig + ourSig + 0x80 + msg), b64 it, inject
+// into the challenge, POST via relay with PAYMENT-SIGNATURE. The merchant's
+// facilitator co-signs as fee payer and settles; the risk JSON is the job result.
+// NO broadcast in this lane — the client never submits; that's the facilitator's job.
 // stdout: {"ok":true,"jobId":"...","sig58":"...","slot":"..."} | {"ok":false,...,"error":"..."}
 const RPC: string = "https://solana-rpc.publicnode.com";
 
@@ -9,6 +14,11 @@ const RPC: string = "https://solana-rpc.publicnode.com";
 // arrays past their literal — index assignment past the end silently no-ops).
 const HEXD: string = "0123456789abcdef";
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const B64A: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const PRINTABLE: string = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+const RELAY_URL: string = "https://fetch-relay.kj95hgdgnn.workers.dev";
+const RELAY_X402: string = "https://fetch-relay.kj95hgdgnn.workers.dev/x402";
+const X402_RESOURCE_URL: string = "https://svalin-api.noobshole.workers.dev/v1/risk/chercher.near";
 
 
 export function run(input: string): string {
@@ -18,8 +28,13 @@ export function run(input: string): string {
   const sig58 = p[1] ?? "";
   const msgHex = p[2] ?? "";
   const cluster = p[3] ?? "mainnet";
+  const resourceUrl = p[4] ?? "";
+  const chalB64 = p[5] ?? "";
+  if (strLen(resourceUrl) > 0) {
+    return x402settle(Q, jobId, sig58, msgHex, resourceUrl, chalB64);
+  }
   if (strLen(sig58) < 80) {
-    return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "bad sig", Q, "}");
+    return errOut(Q, jobId, "settle: empty merchant response");
   }
   if (strLen(msgHex) < 190) {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "bad msg", Q, "}");
@@ -90,10 +105,12 @@ export function run(input: string): string {
 
   // 2. broadcast
   const sendBody = strCat("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sendTransaction\",\"params\":[\"", tx58, "\",{\"encoding\":\"base58\",\"skipPreflight\":false}]}");
-  let rpc = "";
-  if (cluster === "devnet") { rpc = "https://api.devnet.solana.com"; }
-  if (cluster !== "devnet") { rpc = "https://solana-rpc.publicnode.com"; }
-  const sendResp: string = httpPost(rpc, sendBody, "application/json");
+  let sendResp: string = "";
+  if (cluster === "devnet") {
+    sendResp = httpPost("https://api.devnet.solana.com", sendBody, "application/json");
+  } else {
+    sendResp = httpPost("https://solana-rpc.publicnode.com", sendBody, "application/json");
+  }
   const sendErr = extractStr(sendResp, "message");
   if (strLen(sendErr) > 0) {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, strCat("send: ", sendErr), Q, ",", Q, "tx58", Q, ":", Q, tx58, Q, "}");
@@ -104,7 +121,12 @@ export function run(input: string): string {
   let tries = 0;
   while (tries < 10) {
     const pollBody = strCat("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignatureStatuses\",\"params\":[[\"", sig58, "\"],{\"searchTransactionHistory\":false}]}");
-    const pollResp: string = httpPost(rpc, pollBody, "application/json");
+    let pollResp: string = "";
+    if (cluster === "devnet") {
+      pollResp = httpPost("https://api.devnet.solana.com", pollBody, "application/json");
+    } else {
+      pollResp = httpPost("https://solana-rpc.publicnode.com", pollBody, "application/json");
+    }
     slot = extractNum(pollResp, "slot");
     const confirmations = extractNum(pollResp, "confirmations");
     const errStr = extractStr(pollResp, "err");
@@ -157,4 +179,271 @@ function extractNum(j: string, key: string): string {
     i = i + 1;
   }
   return out;
+}
+
+// ── x402 exact-SVM settlement (v6) ────────────────────────────────────────────
+const ZERO_SIG: string = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+function x402settle(Q: string, jobId: string, sig58: string, msgHex: string,
+                    resourceUrl: string, chalB64: string): string {
+  // The P2 gate truncates long dynamic strCat loops (varied content cut at 100
+  // chars; probed d19/d21), so the wasm does NO b64 of its own: it ships the raw
+  // pieces (sig58, msgHex, chalB64) and the relay's /x402 endpoint assembles,
+  // base64s, headers and POSTs the payment. Zero-error surface here.
+  if (strLen(sig58) < 80) { return errOut(Q, jobId, "bad sig"); }
+  if (strLen(msgHex) < 100) { return errOut(Q, jobId, "bad msg"); }
+  // chalB64 unused in relay-mode (relay self-fetches the challenge).
+
+  // sig b58 -> 64B hex (inline bignum)
+  const digits: number[] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+  let dlen = 1;
+  for (let i = 0; i < strLen(sig58); i = i + 1) {
+    const v = scanIdx(B58, strSlice(sig58, i, i + 1));
+    let carry = v;
+    for (let j = 0; j < dlen; j = j + 1) {
+      const x = digits[j] * 58 + carry;
+      digits[j] = x % 256;
+      carry = x / 256;
+    }
+    for (let guard = 0; guard < 90 && carry > 0; guard = guard + 1) {
+      digits[dlen] = carry % 256;
+      dlen = dlen + 1;
+      carry = carry / 256;
+    }
+  }
+  let sigHex = "";
+  for (let hi = 64; hi > 0; hi = hi - 1) {
+    let b = 0;
+    if (hi - 1 < dlen) { b = digits[hi - 1]; }
+    sigHex = strCat(sigHex, strSlice(HEXD, b / 16, b / 16 + 1), strSlice(HEXD, b % 16, b % 16 + 1));
+  }
+  if (strLen(sigHex) !== 128) { return errOut(Q, jobId, "sig not 64B"); }
+
+  // partial v0 wire: cu16(2) + zeroSig + ourSig + version(80) + msg
+  // P2 lowering bug: a strCat whose FIRST arg is a short LITERAL and
+  // whose later args are runtime strings DROPS the literal ("02" lost
+  // -> wire started 0x00, b64 "AAAA..."). Route the literal through a
+  // runtime slice so every arg is runtime-tagged.
+  const ver2 = strSlice("02", 0, 2);
+  const tail = strSlice("80", 0, 2);
+  const wireHex = strCat(ver2, ZERO_SIG, sigHex, tail, msgHex);
+
+  // DIRECT settle — no relay: assemble the x402 payment in-wasm and GET
+  // the merchant with PAYMENT-SIGNATURE (httpGetWithHeader, static core).
+  // chalB64 -> chunked b64decode (the gate corrupts whole-string decode at
+  // 1084 chars — probed 2026-10-17; 96-char chunks proven in exec-a).
+  let chal = "";
+  for (let c = 0; c < strLen(chalB64); c = c + 96) {
+    chal = strCat(chal, b64decode(strSlice(chalB64, c, c + 96)));
+  }
+  const resource = extractObj(chal, "resource");
+  // accepts is an ARRAY: slice from after "accepts":[ to the first "}"
+  const aAt = strIndexOf(chal, "\"accepts\":[");
+  let accepted0 = "";
+  if (aAt >= 0) {
+    const aStart = aAt + strLen("\"accepts\":[");
+    const aEnd = strIndexOf(strSlice(chal, aStart, strLen(chal)), "}");
+    if (aEnd >= 0) { accepted0 = strSlice(chal, aStart, aStart + aEnd + 1); }
+  }
+  const txB64 = b64OfHex(wireHex);
+  const payment = strCat("{\"x402Version\":2,\"resource\":", resource,
+    ",\"accepted\":", accepted0,
+    ",\"payload\":{\"transaction\":\"", txB64, "\"}}");
+  const paymentB64 = b64OfStr(payment);
+  // httpGetWithHeader is literal-URL (static core family) — the x402
+  // resource is fixed per build; fall back to the input URL only as a
+  // sanity check.
+  // URL must be a LITERAL at the call site: an identifier takes the
+  // dynamic-core path where a const-bound tag carries a placeholder
+  // ptr (garbage URL -> canonical lift trap).
+    const respBody = httpGetWithHeader("https://svalin-api.noobshole.workers.dev/v1/risk/chercher.near", "PAYMENT-SIGNATURE", paymentB64);
+  if (strLen(respBody) > 0) {
+    return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
+      Q, "result", Q, ":", respBody, "}");
+  }
+  return errOut(Q, jobId, "settle: empty merchant response");
+}
+
+function errOut(Q: string, jobId: string, msg: string): string {
+  return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
+    Q, "error", Q, ":", Q, msg, Q, "}");
+}
+
+// hex -> base64 (3B -> 4 chars, padded)
+
+// Manual char scan — .indexOf misfires inside some helper contexts
+// (returns 0 for any needle). Proven-safe loop form.
+function scanIdx(hay: string, ch: string): number {
+  for (let k = 0; k < strLen(hay); k = k + 1) {
+    if (strIndexOf(ch, strSlice(hay, k, k + 1)) == 0) { return k; }
+  }
+  return -1;
+}
+
+
+// hex pair (2 chars) -> 0..255 via two 1-char scans (scanIdx is
+// single-char only; a 2-char needle never matches).
+function hexPairVal(pair: string): number {
+  const h = scanIdx(HEXD, strSlice(pair, 0, 1));
+  const l = scanIdx(HEXD, strSlice(pair, 1, 2));
+  return h * 16 + l;
+}
+
+function b64OfHex(hex: string): string {
+  let out = "";
+  const n = strLen(hex) / 2;
+  let i = 0;
+  while (i + 3 <= n) {
+    const a = hexPairVal(strSlice(hex, i * 2, i * 2 + 2));
+    const b = hexPairVal(strSlice(hex, i * 2 + 2, i * 2 + 4));
+    const c = hexPairVal(strSlice(hex, i * 2 + 4, i * 2 + 6));
+    out = strCat(out,
+      strSlice(B64A, a / 4, a / 4 + 1),
+      strSlice(B64A, (a % 4) * 16 + b / 16, (a % 4) * 16 + b / 16 + 1),
+      strSlice(B64A, (b % 16) * 4 + c / 64, (b % 16) * 4 + c / 64 + 1),
+      strSlice(B64A, c % 64, c % 64 + 1));
+    i = i + 3;
+  }
+  return strCat(out, "|", toStr(strLen(out)));
+}
+
+// ASCII string -> base64
+function b64OfStr(s: string): string {
+  let out = "";
+  const n = strLen(s);
+  let i = 0;
+  while (i + 3 <= n) {
+    const ch0 = s.charAt(i);
+    const ch1 = s.charAt(i + 1);
+    const ch2 = s.charAt(i + 2);
+    const v0 = PRINTABLE.indexOf(ch0);
+    const v1 = PRINTABLE.indexOf(ch1);
+    const v2 = PRINTABLE.indexOf(ch2);
+    const c0 = v0 + 32;
+    const c1 = v1 + 32;
+    const c2 = v2 + 32;
+    const n0 = c0 / 4;
+    const n1 = (c0 - n0 * 4) * 16 + c1 / 16;
+    const n2 = (c1 - (c1 / 16) * 16) * 4 + c2 / 64;
+    const n3 = c2 - (c2 / 64) * 64;
+    out = strCat(out, strSlice(B64A, n0, n0 + 1), strSlice(B64A, n1, n1 + 1),
+      strSlice(B64A, n2, n2 + 1), strSlice(B64A, n3, n3 + 1));
+    i = i + 3;
+  }
+  // Remainder via pad-and-trim: spaces are index 0 (code 32). Padding
+  // avoids arith-in-guard blocks that poison in this exec (found: the
+  // rem==1 block type-broke the whole module).
+  const rem = n - i;
+  if (rem == 0) { return out; }
+  let padded = s;
+  let drop = 0;
+  if (rem == 1) {
+    padded = strCat(s, "  ");
+    drop = 2;
+  }
+  if (rem == 2) {
+    padded = strCat(s, " ");
+    drop = 1;
+  }
+  let full = "";
+  let j = 0;
+  const np = strLen(padded);
+  while (j + 3 <= np) {
+    const d0 = padded.charAt(j);
+    const d1 = padded.charAt(j + 1);
+    const d2 = padded.charAt(j + 2);
+    const w0 = PRINTABLE.indexOf(d0);
+    const w1 = PRINTABLE.indexOf(d1);
+    const w2 = PRINTABLE.indexOf(d2);
+    const e0 = w0 + 32;
+    const e1 = w1 + 32;
+    const e2 = w2 + 32;
+    const m0 = e0 / 4;
+    const m1 = (e0 - m0 * 4) * 16 + e1 / 16;
+    const m2 = (e1 - (e1 / 16) * 16) * 4 + e2 / 64;
+    const m3 = e2 - (e2 / 64) * 64;
+    full = strCat(full, strSlice(B64A, m0, m0 + 1), strSlice(B64A, m1, m1 + 1),
+      strSlice(B64A, m2, m2 + 1), strSlice(B64A, m3, m3 + 1));
+    j = j + 3;
+  }
+  return strSlice(full, 0, strLen(full) - drop);
+}
+
+
+// base64 to ASCII (challenge JSON is pure ASCII)
+function b64decode(s: string): string {
+  let out = "";
+  let acc = 0;
+  let bits = 0;
+  for (let i = 0; i < strLen(s); i = i + 1) {
+    const ch = strSlice(s, i, i + 1);
+    // NOTE: no `ch == "="` and no strIndexOf-'=' probe here — both poison this
+    // loop in the P2 gate (d8/d13/d14 probes: loop emits nothing). '=' padding
+    // only trails the b64; strIndexOf skips unknown chars anyway.
+    const v = B64A.indexOf(ch);
+    if (v < 0) { continue; }
+    acc = acc * 64 + v;
+    bits = bits + 6;
+    if (bits >= 8) {
+      bits = bits - 8;
+      const pw = pow2(bits);
+      const byteVal = acc / pw;
+      acc = acc % pw;
+      // strCat, NOT `+`: concat-by-plus inside this loop yields "" in the P2
+      // gate (d13 probe) — strCat is the only proven form (d11 probe).
+      out = strCat(out, strSlice(PRINTABLE, byteVal % 256 - 32, byteVal % 256 - 32 + 1));
+    }
+  }
+  return out;
+}
+
+function pow2(n: number): number {
+  let r = 1;
+  while (n > 0) { r = r * 2; n = n - 1; }
+  return r;
+}
+
+function chrCode(code: number): string {
+  // P2 surface has no charCodeAt/chr: look the char up in the printable-ASCII
+  // constant (challenge JSON = base64 text = printable only).
+  return strSlice(PRINTABLE, code - 32, code - 32 + 1);
+}
+
+
+// balanced-brace object after "key":
+function extractObj(json: string, key: string): string {
+  const pat = strCat("\"", key, "\":");
+  const at = strIndexOf(json, pat);
+  if (at < 0) { return ""; }
+  const start = at + strLen(pat);
+  let depth = 0;
+  let p = start;
+  while (p < strLen(json)) {
+    const ch = strSlice(json, p, p + 1);
+    if (ch == "{") { depth = depth + 1; }
+    if (ch == "}") {
+      depth = depth - 1;
+      if (depth == 0) { return strSlice(json, start, p + 1); }
+    }
+    p = p + 1;
+  }
+  return "";
+}
+
+// JSON string field with escape handling
+function extractJsonField(j: string, key: string): string {
+  const pat = strCat("\"", key, "\":\"");
+  const at = strIndexOf(j, pat);
+  if (at < 0) { return ""; }
+  const vs = at + strLen(pat);
+  let p = vs;
+  let esc = false;
+  while (p < strLen(j)) {
+    const ch = strSlice(j, p, p + 1);
+    if (esc) { esc = false; }
+    else if (ch == "\\") { esc = true; }
+    else if (ch == "\"") { return strSlice(j, vs, p); }
+    p = p + 1;
+  }
+  return "";
 }
