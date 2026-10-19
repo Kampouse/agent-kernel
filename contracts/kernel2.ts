@@ -236,7 +236,7 @@ export function callApi(url: string, suffix: string, budget: string, payer58: st
   // vanished → svalin sim_failed; job f380aec0). Loop-append is the
   // codebase's proven pattern (exec-a b64decode, msgBin in onResult v1).
   let msgBin: string = "020104" + "08";
-  msgBin = strCat(msgBin, b58ToHex(feePayer), MPC_PUBKEY_HEX);
+  msgBin = strCat(msgBin, b58ToHex(feePayer), pubHex);
   msgBin = strCat(msgBin, b58ToHex(dstAta), b58ToHex(srcAta));
   msgBin = strCat(msgBin, CU_PROG_HEX, MEMO_PROG_HEX, TOKEN_PROG_HEX);
   msgBin = strCat(msgBin, b58ToHex(mint), b58ToHex(blockhash58));
@@ -529,7 +529,9 @@ function parseExecAResult(jobId: string, raw: string, resp: string): void {
   if (strLen(feePayer) !== 44 || strLen(mint) !== 44 || strLen(srcAta) !== 44) {
     rejectJob(jobId, owner, budget, "bad challenge fields"); return;
   }
-  if (b58ToHex(payer58) !== MPC_PUBKEY_HEX) { rejectJob(jobId, owner, budget, "payer not MPC key"); return; }
+  const payerHex = near.storageGet("pub:" + owner)
+    ?? (owner === near.currentAccountId() ? MPC_PUBKEY_HEX : "");
+  if (payerHex === "" || b58ToHex(payer58) !== payerHex) { rejectJob(jobId, owner, budget, "payer not MPC key"); return; }
   const dstAta = near.storageGet("paytoata:" + suffix) ?? "";
   const pinMint = near.storageGet("paytomint:" + suffix) ?? "";
   if (dstAta === "" || pinMint === "") { rejectJob(jobId, owner, budget, "incomplete merchant pin"); return; }
@@ -554,6 +556,8 @@ function parseExecAResult(jobId: string, raw: string, resp: string): void {
   //   ixs:    CUlimit(60000) | CUprice(1000) | TransferChecked(amt,6) | Memo(nonce)
   //   MPC payload = "80" + msgHex (v0 version byte is INSIDE the signed bytes).
   const amtHex = decToLeHexU64(amount);
+  // payer key = job owner's DERIVED key (per-wallet-per-call); pin fallback
+  // covers the k2-self legacy lane only.
   // Byte-verified against solders MessageV0 ground truth AND the facilitator-
   // accepted landed settlement tx (devnet, 2026-10). Layout:
   //   hdr 02 01 04 || 8 keys: feePayer payer dstATA srcATA cu memo token mint
@@ -564,7 +568,7 @@ function parseExecAResult(jobId: string, raw: string, resp: string): void {
     // v0 layout: header(3B: numSig=2, roSigned=1, roUnsigned=4) + compact-u16
     // key count (08 = 8 static keys) + keys + blockhash + ix count + ixs.
     "020104", "08",
-    b58ToHex(feePayer), MPC_PUBKEY_HEX,
+    b58ToHex(feePayer), payerHex,
     b58ToHex(dstAta), b58ToHex(srcAta),
     CU_PROG_HEX, MEMO_PROG_HEX, TOKEN_PROG_HEX, b58ToHex(mint),
     b58ToHex(blockhash),
