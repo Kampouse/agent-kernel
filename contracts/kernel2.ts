@@ -33,6 +33,10 @@
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const OUTLAYER_CONTRACT: string = "outlayer.testnet";
 const MPC_CONTRACT: string = "v1.signer-prod.testnet";
+// per-caller MPC pubkey cache ("pub:<caller>" = derived ed25519 pubkey hex).
+// Filled by onKeyDerived via MPC.derived_public_key (cross-contract view —
+// direct view from RPC fails: the method reads predecessor_account_id).
+// Path = caller-suffix; caller = k2 at sign time, so the path IS the namespace.
 // MPC-derived ed25519 pubkey (hex, 64 chars). Pinned to the honest-signer test
 // key for the devnet lane; the real MPC derive replaces this (same slot, key
 // derived from MPL path "kernel-<jobId>"). Address on Solana:
@@ -198,6 +202,19 @@ export function callApi(url: string, suffix: string, budget: string, payer58: st
   if (srcAta === "") { near.panic("unpinned srcAta"); }
   const dstAta = near.storageGet("paytoata:" + suffix) ?? "";
   const mint = near.storageGet("paytomint:" + suffix) ?? "";
+  // payer MUST be the caller's MPC-derived key (per-wallet-per-call)
+  let pubHex = near.storageGet("pub:" + caller) ?? "";
+  if (pubHex === "" && caller === near.currentAccountId()) { pubHex = MPC_PUBKEY_HEX; }
+  if (pubHex === "") {
+    // first call from this caller: derive key async, caller retries after
+    const path = caller + "-" + suffix;
+    near.callAwait(MPC_CONTRACT, "derived_public_key",
+      `{"path":"${path}","domain_id":1}`, 30000000000000,
+      "onKeyDerived", 10000000000000, `{"caller":"${caller}"}`);
+    near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"key_deriving","data":{"caller":"${caller}"}}`);
+    return "deriving:" + caller;
+  }
+  if (b58ToHex(payer58) !== pubHex) { near.panic("payer != caller derived key"); }
   // escrow
   const credit = ledgerGet("credittok:", caller);
   if (u128Lt(budget, "1")) { near.panic("bad budget"); }
@@ -242,6 +259,33 @@ export function callApi(url: string, suffix: string, budget: string, payer58: st
 // ── quote gate + the two funding legs ─────────────────────────────────────────
 // promiseResult(0) = exec-quote's output as JSON-escaped text; jsonGetStrEsc
 // unescapes then scans at any object depth (nested JSON-in-JSON included).
+// ── per-caller MPC key derivation (per-wallet-per-call) ────────────────────
+// callback of callAwait(MPC.derived_public_key). Result = quoted hex pubkey
+// (64 chars) for path caller-suffix. Store under "pub:<caller>"; the caller
+// then re-fires callApi with payer58 = b58(pubHex).
+export function onKeyDerived(caller: string): void {
+  if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("self only"); }
+  const raw = near.promiseResult(0);
+  if (raw === "" || strLen(raw) < 16) {
+    near.log("DBG derived=[" + raw + "]");
+    near.panic("derive failed");
+  }
+  // strip quotes if the result is a JSON string literal
+  let b58 = raw;
+  if (strSlice(b58, 0, 1) == "\"") { b58 = strSlice(b58, 1, strLen(b58) - 1); }
+  // result is "ed25519:<b58 key>" — strip the prefix
+  const p = strIndexOf(b58, "ed25519:");
+  if (p >= 0) { b58 = strSlice(b58, p + 8, strLen(b58)); }
+  const hex = b58ToHex(b58);
+  if (strLen(hex) !== 64) { near.panic("bad derived pubkey len " + toStr(strLen(hex))); }
+  near.storageSet("pub:" + caller, hex);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"key_derived","data":{"caller":"${caller}"}}`);
+}
+
+export function pubKeyOf(caller: string): string {
+  return near.storageGet("pub:" + caller) ?? "";
+}
+
 export function onQuote(jobId: string): void {
   requireOutlayer();
   requireJob(jobId, "quote_phase");
