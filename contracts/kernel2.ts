@@ -259,6 +259,39 @@ export function callApi(url: string, suffix: string, budget: string, payer58: st
 // ── quote gate + the two funding legs ─────────────────────────────────────────
 // promiseResult(0) = exec-quote's output as JSON-escaped text; jsonGetStrEsc
 // unescapes then scans at any object depth (nested JSON-in-JSON included).
+// ── agent surface (self-describing onboarding + one-shot paid call) ─────────
+// agent(caller?) — one view an AI agent calls FIRST: returns its derived
+// payer, srcAta, credit, funding intent JSON, and full usage instructions.
+// The contract teaches the protocol; the agent just follows it.
+export function agent(caller: string): string {
+  const me = (caller === "") ? near.predecessorAccountId() : caller;
+  const pubHex = near.storageGet("pub:" + me) ?? "";
+  let payer58 = "";
+  if (pubHex !== "") { payer58 = hexToB58(pubHex); }
+  const srcAta = (payer58 === "") ? "" : (near.storageGet("srcata:" + payer58) ?? "");
+  const first = (payer58 === "")
+    ? `{"step":1,"action":"call callApi once (any args) to trigger derive, retry in ~2s","derivePath":"${me}-<suffix>"}`
+    : `{"step":"ready","payer":"${payer58}","srcAta":"${srcAta}"}`;
+  const omft = near.storageGet("fundomft:") ?? "sol-epjfwdd5aufqssqep2q2nhhy3ryuvbzeacsp7ttg6lhcy.omft.near";
+  return `{"caller":"${me}",` +
+    `"payer":"${payer58}",` +
+    `"srcAta":"${srcAta}",` +
+    `"creditTok":"${ledgerGet("credittok:", me)}",` +
+    `"keyState":${first},` +
+    `"fundIntent":${"{"} "intent":"ft_withdraw","token":"${omft}","receiver_id":"${omft}","memo":"WITHDRAW_TO:${payer58}","signer_id":"${me}" ${"}"},` +
+    `"call":"callApi(url, suffix, budget, payer58, blockhash58) -> jobId | 'deriving:<you>'",` +
+    `"suffixes":["chercher"],` +
+    `"poll":"job(jobId).status -> done|failed; resultOf(jobId) -> paid response",` +
+    `"note":"payer58 MUST be your derived payer; blockhash: POST getLatestBlockhash to https://api.devnet.solana.com"}`;
+}
+
+// fundDomft pin (admin): which OMFT token id the fundIntent advertises
+export function pinFundOmft(omft: string): void {
+  if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("self only"); }
+  if (strLen(omft) < 5 || strLen(omft) > 100) { near.panic("bad omft"); }
+  near.storageSet("fundomft:", omft);
+}
+
 // ── per-caller MPC key derivation (per-wallet-per-call) ────────────────────
 // callback of callAwait(MPC.derived_public_key). Result = quoted hex pubkey
 // (64 chars) for path caller-suffix. Store under "pub:<caller>"; the caller
@@ -897,6 +930,51 @@ function nonceOf(jobId: string): string {
   return out;
 }
 // base58 (32-byte pubkey) → big-endian hex; MSB-first digits array
+
+// hex (64 chars = 32 bytes) -> base58 (ed25519 pubkey address).
+// MSB-first bignum: repeated divide-whole-array-by-58, remainders are digits.
+function hexToB58(hex: string): string {
+  const bytes: number[] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+  let any = 0;
+  for (let i = 0; i < 32; i = i + 1) {
+    bytes[i] = hexVal(strSlice(hex, i * 2, i * 2 + 1)) * 16 + hexVal(strSlice(hex, i * 2 + 1, i * 2 + 2));
+    if (bytes[i] !== 0) { any = 1; }
+  }
+  let out = "";
+  let dbg = "";
+  while (any === 1) {
+    let rem = 0;
+    any = 0;
+    for (let i = 0; i < 32; i = i + 1) {
+      const cur = rem * 256 + bytes[i];
+      bytes[i] = cur / 58;
+      rem = cur % 58;
+      if (bytes[i] !== 0) { any = 1; }
+    }
+    out = B58.charAt(rem) + out;
+  }
+  return out;
+}
+function hexVal(c: string): number {
+  // gate parseInt returns 0 (NOT NaN) on non-numeric — check letters FIRST
+  if (c == "a" || c == "A") { return 10; }
+  if (c == "b" || c == "B") { return 11; }
+  if (c == "c" || c == "C") { return 12; }
+  if (c == "d" || c == "D") { return 13; }
+  if (c == "e" || c == "E") { return 14; }
+  if (c == "f" || c == "F") { return 15; }
+  if (c == "0") { return 0; }
+  if (c == "1") { return 1; }
+  if (c == "2") { return 2; }
+  if (c == "3") { return 3; }
+  if (c == "4") { return 4; }
+  if (c == "5") { return 5; }
+  if (c == "6") { return 6; }
+  if (c == "7") { return 7; }
+  if (c == "8") { return 8; }
+  if (c == "9") { return 9; }
+  return 0;
+}
 function b58ToHex(s: string): string {
   // P2 arrays never grow past their literal length — preallocate 64 cells, track len manually
   const digits: number[] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
