@@ -41,7 +41,7 @@ fn run(input: &str) -> String {
     wire.push(2);
     wire.extend_from_slice(&[0u8; 64]);
     wire.extend_from_slice(&sig_bytes);
-    wire.push(0x80); // v0 version byte: wire = cu16|sigs|0x80|msg(350B)
+    wire.push(0x80u8); // v0 version byte: wire = cu16|sigs|0x80|msg(350B)
     let mut i = 0;
     while i + 2 <= msg_hex.len() {
         match u8::from_str_radix(&msg_hex[i..i + 2], 16) {
