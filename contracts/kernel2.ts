@@ -31,7 +31,7 @@
 //   callApi     60 + 230 = 290 ✓        onQuote   10 + 60 + 145 = 215 ≤ 230 ✓
 //   onResult    40 + 100 = 140 ≤ 145 ✓   onSignDone 25 + 60 = 85 ≤ 100 ✓
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-const OUTLAYER_CONTRACT: string = "outlayerlocal.testnet";
+const OUTLAYER_CONTRACT: string = "outlayer.testnet";
 const MPC_CONTRACT: string = "v1.signer-prod.testnet";
 // MPC-derived ed25519 pubkey (hex, 64 chars). Pinned to the honest-signer test
 // key for the devnet lane; the real MPC derive replaces this (same slot, key
@@ -591,6 +591,24 @@ export function broadcast(jobId: string): string {
 // after CONFIRMING the Solana tx via getSignatureStatuses. Settlement closes the
 // loop with no human in the middle; settle() remains as owner-only recovery for
 // genuinely stuck jobs (exec-b timeout / TEE unreachable).
+
+// replace every \" with " (single quote-layer unescape, division-free)
+function unquoteLayer(s: string): string {
+  let o = "";
+  let i = 0;
+  const n = strLen(s);
+  while (i < n) {
+    if (i + 1 < n && strSlice(s, i, i + 1) == "\\" && strSlice(s, i + 1, i + 2) == "\"") {
+      o = strCat(o, "\"");
+      i = i + 2;
+    } else {
+      o = strCat(o, strSlice(s, i, i + 1));
+      i = i + 1;
+    }
+  }
+  return o;
+}
+
 export function onExecBDone(jobId: string): void {
   if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("outlayer lane only"); }
   const raw = near.storageGet("job:" + jobId);
@@ -619,6 +637,12 @@ export function onExecBDone(jobId: string): void {
     if (u128Gt(amount, budget)) { near.panic("cost exceeds held budget"); }
     refund = u128Sub(budget, amount);
     setJobStatus(jobId, "done");
+    // persist the API result so contracts/indexers can read it:
+    // resultOf(jobId) view, or view_state prefix "jobres:<jobId>".
+    // raw store (as received, minus the escape layers from promiseResult)
+    let res = out;
+    res = unquoteLayer(res);
+    near.storageSet("jobres:" + jobId, res);
   } else {
     setJobStatus(jobId, "failed");
   }
@@ -677,6 +701,14 @@ export function creditOf(user: string): string {
 }
 export function job(jobId: string): string {
   return near.storageGet("job:" + jobId) ?? "";
+}
+
+// Paid-API result (risk report etc.), stored by onExecBDone on success.
+// Readable by ANYONE: NEAR contract state is public — another contract can
+// read it via a cross-contract call to resultOf(), or anyone via view_state
+// prefix "jobres:". Do NOT put secrets here.
+export function resultOf(jobId: string): string {
+  return near.storageGet("jobres:" + jobId) ?? "";
 }
 
 // ── promiseThen parity probe (pure self-chain, no outlayer) ───────────────
