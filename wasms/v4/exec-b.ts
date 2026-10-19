@@ -228,94 +228,18 @@ function x402settle(Q: string, jobId: string, sig58: string, msgHex: string,
   const tail = strSlice("80", 0, 2);
   const wireHex = strCat(ver2, ZERO_SIG, sigHex, tail, msgHex);
 
-  // DIRECT settle — no relay: assemble the x402 payment in-wasm and GET
-  // the merchant with PAYMENT-SIGNATURE (httpGetWithHeader, static core).
-  // chalB64 -> chunked b64decode (the gate corrupts whole-string decode at
-  // 1084 chars — probed 2026-10-17; 96-char chunks proven in exec-a).
-  let chal = "";
-  for (let c = 0; c < strLen(chalB64); c = c + 96) {
-    chal = strCat(chal, b64decode(strSlice(chalB64, c, c + 96)));
-  }
-  const resource = extractObj(chal, "resource");
-  // accepts is an ARRAY: slice from after "accepts":[ to the first "}"
-  const aAt = strIndexOf(chal, "\"accepts\":[");
-  let accepted0 = "";
-  if (aAt >= 0) {
-    const aStart = aAt + strLen("\"accepts\":[");
-    // brace-depth match: accepts[0] contains NESTED objects (extra{})
-    let depth = 0;
-    let p = aStart;
-    while (p < strLen(chal)) {
-      const ch = strSlice(chal, p, p + 1);
-      if (ch == "{") { depth = depth + 1; }
-      if (ch == "}") {
-        depth = depth - 1;
-        if (depth == 0) { accepted0 = strSlice(chal, aStart, p + 1); break; }
-      }
-      p = p + 1;
-    }
-  }
-  const txB64 = b64OfHex(wireHex);
-  const payment = strCat("{\"x402Version\":2,\"resource\":", resource,
-    ",\"accepted\":", accepted0,
-    ",\"payload\":{\"transaction\":\"", txB64, "\"}}");
-  // strCat result -> helper fn reads stale buffer (nil-poisoning class);
-  // re-slice to force a fresh string binding (proven workaround).
-  // b64OfStr's internal strLen aliases a stale length on large strings.
-  // Chunk explicitly (unrolled — for-loop scope breaks the TS frontend).
-  const paymentS = strSlice(payment, 0, strLen(payment));
-  // Deterministic path: ASCII -> hex (scanIdx lookup per char), then
-  // the hex->b64 encoder (b64OfHex) that has been byte-exact on every
-  // run (it produced the accepted tx b64 all session).
-  // strCat accumulation aliases a stale buffer beyond ~1000 chars.
-  // Re-bind (strSlice) the accumulator every 240 chars to force a
-  // fresh string slot; 240 is a multiple of 3 and of 2 (hex pairing).
-  // strLen on accumulated strings aliases stale lengths (proven: 1474
-  // char string read back as 1473/367). b64OfHex trusts strLen → wrong.
-  // Fix: explicit-length b64. Build b64 directly from payment chars:
-  // 3 ASCII chars -> 4 b64 chars, remainder via pad-and-trim.
-  let paymentB64 = "";
-  const plen = strLen(paymentS);
-  let bi = 0;
-  while (bi + 3 <= plen) {
-    const c0 = scanIdx(PRINTABLE, strSlice(paymentS, bi, bi + 1)) + 32;
-    const c1 = scanIdx(PRINTABLE, strSlice(paymentS, bi + 1, bi + 2)) + 32;
-    const c2 = scanIdx(PRINTABLE, strSlice(paymentS, bi + 2, bi + 3)) + 32;
-    paymentB64 = strCat(paymentB64,
-      strSlice(B64A, c0 / 4, c0 / 4 + 1),
-      strSlice(B64A, (c0 % 4) * 16 + c1 / 16, (c0 % 4) * 16 + c1 / 16 + 1),
-      strSlice(B64A, (c1 % 16) * 4 + c2 / 64, (c1 % 16) * 4 + c2 / 64 + 1),
-      strSlice(B64A, c2 % 64, c2 % 64 + 1));
-    bi = bi + 3;
-  }
-  const rem = plen - bi;
-  if (rem == 1) {
-    const c0 = scanIdx(PRINTABLE, strSlice(paymentS, bi, bi + 1)) + 32;
-    const c1 = 0;
-    paymentB64 = strCat(paymentB64,
-      strSlice(B64A, c0 / 4, c0 / 4 + 1),
-      strSlice(B64A, (c0 % 4) * 16, (c0 % 4) * 16 + 1), "AA");
-  }
-  if (rem == 2) {
-    const c0 = scanIdx(PRINTABLE, strSlice(paymentS, bi, bi + 1)) + 32;
-    const c1 = scanIdx(PRINTABLE, strSlice(paymentS, bi + 1, bi + 2)) + 32;
-    paymentB64 = strCat(paymentB64,
-      strSlice(B64A, c0 / 4, c0 / 4 + 1),
-      strSlice(B64A, (c0 % 4) * 16 + c1 / 16, (c0 % 4) * 16 + c1 / 16 + 1),
-      strSlice(B64A, (c1 % 16) * 4, (c1 % 16) * 4 + 1), "A");
-  }
-  // httpGetWithHeader is literal-URL (static core family) — the x402
-  // resource is fixed per build; fall back to the input URL only as a
-  // sanity check.
-  // URL must be a LITERAL at the call site: an identifier takes the
-  // dynamic-core path where a const-bound tag carries a placeholder
-  // ptr (garbage URL -> canonical lift trap).
-    const respBody = httpGetWithHeader("https://svalin-api.noobshole.workers.dev/v1/risk/chercher.near", "PAYMENT-SIGNATURE", paymentB64);
-  if (strLen(respBody) > 0) {
+  // RELAY settle — the static-core httpGetWithHeader silently mangles the
+  // ~1.4KB PAYMENT-SIGNATURE value ({} every time, probed 2026-10-19);
+  // the relay's /x402 route assembles the payment from wire_hex + a fresh
+  // challenge and returns {status, body, payment-* headers} verbatim.
+  const relayBody = strCat("{\"url\":\"https://svalin-api.noobshole.workers.dev/v1/risk/chercher.near\",\"wire_hex\":\"",
+    wireHex, "\"}");
+  const relayResp = httpPost("https://fetch-relay.kj95hgdgnn.workers.dev/x402", relayBody, "application/json");
+  if (strLen(relayResp) > 0) {
     return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
-      Q, "result", Q, ":", respBody, "}");
+      Q, "result", Q, ":", relayResp, "}");
   }
-  return errOut(Q, jobId, "settle: empty merchant response");
+  return errOut(Q, jobId, "settle: empty relay response");
 }
 
 function errOut(Q: string, jobId: string, msg: string): string {
