@@ -65,18 +65,34 @@ fn run(input: &str) -> String {
         Ok(r) => r,
         Err(e) => return err(&format!("challenge: {:?}", e)),
     };
-    let chal_bytes = match pre_resp.body() { Ok(b) => b, Err(e) => return err(&format!("challenge body: {:?}", e)) };
-    let chal_body = String::from_utf8_lossy(&chal_bytes).to_string();
-    // challenge rides the payment-required header in x402 v2; wasi-http-client
-    // may not expose response headers — the svalin worker ALSO mirrors the
-    // challenge into the 402 body (checked: body contains accepts[]).
+    // x402 v2: challenge rides the payment-required RESPONSE HEADER
+    // (b64 JSON). Body is empty {} on 402.
+    let hdrs = pre_resp.headers();
+    let chal_b64 = hdrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("payment-required"))
+        .map(|(_, v)| v.clone());
+    let chal_body = match chal_b64 {
+        Some(cb) => {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(cb.trim()) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Err(_) => cb, // maybe not b64 — use raw
+            }
+        }
+        None => {
+            // fallback: body
+            let chal_bytes = match pre_resp.body() { Ok(b) => b, Err(e) => return err(&format!("challenge body: {:?}", e)) };
+            String::from_utf8_lossy(&chal_bytes).to_string()
+        }
+    };
     let resource = match json_field(&chal_body, "resource") {
         Some(v) => v,
-        None => return err("challenge: no resource in body"),
+        None => return err("challenge: no resource"),
     };
     let accepted = match json_accepts0(&chal_body) {
         Some(v) => v,
-        None => return err("challenge: no accepts in body"),
+        None => return err("challenge: no accepts"),
     };
 
     let payment = format!(
