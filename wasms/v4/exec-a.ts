@@ -319,7 +319,12 @@ export function run(input: string): string {
   if (networkTag == "mainnet") {
     bhResp = httpPost("https://solana-rpc.publicnode.com", bhBody, "application/json");
   } else {
+    // devnet endpoint rate-limits (429) per IP — one retry on miss (2026-10-19:
+    // TEE fetch returned an error body, job failed "no blockhash")
     bhResp = httpPost("https://api.devnet.solana.com", bhBody, "application/json");
+    if (strLength(extractStr(bhResp, "blockhash")) != 44) {
+      bhResp = httpPost("https://api.devnet.solana.com", bhBody, "application/json");
+    }
   }
   const blockhash = extractStr(bhResp, "blockhash");
   if (strLength(blockhash) != 44) {
