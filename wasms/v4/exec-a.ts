@@ -236,7 +236,7 @@ export function run(input: string): string {
   if (strSlice(url, 0, 8) != "https://") {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "https only", Q, "}");
   }
-  if (strLength(payer58) != 44) {
+  if (strLength(payer58) != 43 && strLength(payer58) != 44) {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "bad payer", Q, "}");
   }
 
