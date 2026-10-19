@@ -337,15 +337,16 @@ export function run(input: string): string {
   // P2 gate: ONE big strCat call truncates ~292 chars with varied content
   // (probed 2026-10-17). Incremental accumulation (loop-proven pattern,
   // b64decode grew 813 chars fine) sidesteps it.
+  // SLIM OUTPUT (2026-10-19): only what the kernel PARSES (msgHex, network).
+  // Everything else rides INSIDE msgHex ("0|payTo|amount|blockhash|payer|
+  // feePayer|mint|srcAta"). chalB64 dropped: exec-b relay-mode self-fetches
+  // the challenge (chalB64 unused in x402settle). Full output was 3041 B —
+  // over the daemon's 800 B inline-resume threshold, forcing the
+  // submit_execution_output_and_resolve lane whose metadata-only resume made
+  // the kernel's refetch spawn the whole pipeline's blocker. Slim output
+  // resumes INLINE and the refetch lane is dead code.
   let out: string = strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",");
-  out = strCat(out, Q, "free", Q, ":false,", Q, "payTo", Q, ":", Q, payTo, Q, ",");
-  out = strCat(out, Q, "amount", Q, ":", Q, amount, Q, ",");
-  out = strCat(out, Q, "blockhash", Q, ":", Q, blockhash, Q, ",");
-  out = strCat(out, Q, "feePayer", Q, ":", Q, feePayer, Q, ",");
-  out = strCat(out, Q, "mint", Q, ":", Q, mint, Q, ",");
-  out = strCat(out, Q, "srcAta", Q, ":", Q, srcAta58, Q, ",");
   out = strCat(out, Q, "network", Q, ":", Q, networkTag, Q, ",");
-  out = strCat(out, Q, "chalB64", Q, ":", Q, chalB64, Q, ",");
   out = strCat(out, Q, "msgHex", Q, ":", Q, msgHex, Q, "}");
   return out;
 }
