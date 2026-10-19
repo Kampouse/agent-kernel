@@ -57,9 +57,9 @@ const SIGN_GAS: number = 40000000000000;
 //   broadcast:  own ~15 + exec 130 + cb_execb 60 = 205
 // The old one-call design needed ~460 across nested receipts → always died
 // on-chain at the cap (mock has no cap, so 14/14 mock-green masked it).
-const CB_GAS_RESULT: number = 450000000000000; // onResult forwards sign 40 + onSignDone 360
-const CB_GAS_SIGN: number = 300000000000000 + CB_GAS_EXECB;  // work + broadcast spawn (280) + its callback forward (60)
+const CB_GAS_RESULT: number = 450000000000000; // onResult: own + sign 40 + cb_sign 60
 const CB_GAS_EXECB: number = 60000000000000;
+const CB_GAS_SIGN: number = 300000000000000;  // sign work only (early exec-b handles settle)
 const CB_GAS_QUOTE: number = 720000000000000; // start spawn 680 + own work, 35+ slack
 const EXEC_GAS: number = 185000000000000;
 const EXEC_FEE: string = "4000010000000000000000"; // outlayer payment per execution
@@ -69,8 +69,8 @@ const FT_GAS: number = 10000000000000;
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d544116eb6d0b9";
-const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "c0522534b2d334e6d038de7678b24c5569d36cd6bb907d26491cf96280de2b45";
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
+const EXEC_B_HASH: string = "d932e45453352d5f01bb531cd7e73add5f0611a4b5b0958281812f1d7f2ef244";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
@@ -219,6 +219,11 @@ export function onQuote(jobId: string): void {
   // can't fit it). start()'s gate allows self-spawn.
   const pStart = near.promiseBatchCreate(near.currentAccountId());
   near.promiseBatchActionFunctionCall(pStart, "start", `{"jobId":"${jobId}"}`, "0", 680000000000000);
+  // EARLY exec-b: spawn now (fresh receipt budget) — it polls jobsig:<jobId>
+  // via RPC and settles within seconds of the MPC sig landing. Spawning
+  // post-sign misses the blockhash window (daemon polls ~60s).
+  const pEarly = near.promiseBatchCreate(near.currentAccountId());
+  near.promiseBatchActionFunctionCall(pEarly, "execBEarly", `{"jobId":"${jobId}"}`, "0", 300000000000000);
 }
 
 // ── SPLIT STAGE 2 (v2.5): fresh 300 Tgas tx — fund + fire exec-a ────────────
@@ -475,17 +480,32 @@ export function onSignDone(jobId: string): string {
   if (sig58 === "") { near.panic("sig encode failed"); }
   near.storageSet("jobsig:" + jobId, sig58);
   setJobStatus(jobId, "sig_done");
+  // early exec-b handles the settle; broadcast() stays as manual fallback
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.5.1","event":"sign_done","data":{"jobId":"${jobId}"}}`);
-  // AUTO-BROADCAST: self-spawn a fresh broadcast receipt (its own 300 Tgas
-  // budget — a callback cannot carry the exec-b forward inline without
-  // busting the per-closure static cap). Blockhash expiry makes every second
-  // count: manual broadcast cost us the settle window.
-  const p2 = near.promiseBatchCreate(near.currentAccountId());
-  near.promiseBatchActionFunctionCall(p2, "broadcast", `{"jobId":"${jobId}"}`, "0", 280000000000000);
-  // NO promiseThen here: broadcast()'s own return would arrive as
-  // promiseResult(0)="broadcasting" and race the REAL callback that
-  // outlayer's resolve delivers (the one that reads the wasm output).
+  // early exec-b (spawned in onResult) polls jobsig and settles; no
+  // broadcast spawn needed. settle() remains the owner fallback.
   return "sig_done";
+}
+
+// ── EARLY exec-b: spawn the settle wasm while MPC sign is in flight ─────────
+// exec-b v5.5 polls jobsig:<jobId> over RPC and settles within seconds of
+// the signature landing (the daemon's ~60s poll made post-sign spawn miss
+// the blockhash window).
+export function execBEarly(jobId: string): string {
+  const caller = near.predecessorAccountId();
+  const raw = near.storageGet("job:" + jobId) ?? "";
+  if (raw === "") { near.panic("unknown job"); }
+  const owner = near.jsonGetStr("owner", raw) ?? "";
+  if (caller !== owner && caller !== near.currentAccountId()) { near.panic("owner only"); }
+  const st = (near.jsonGetStr("status", raw) ?? "");
+  if (st !== "quote_ready" && st !== "sign_requested") { near.panic("bad state " + st); }
+  setJobStatus(jobId, "broadcasting");
+  const jobUrl = near.jsonGetStr("url", raw) ?? "";
+  // empty sig field → exec-b polls jobsig:<jobId> itself
+  const input = `${jobId}||${near.storageGet("jobmsg:" + jobId) ?? ""}|${near.storageGet("jobnet:" + jobId) ?? ""}|${jobUrl}|${near.storageGet("jobchal:" + jobId) ?? ""}`;
+  requestWasmExecution(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB, 240);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.6.0","event":"broadcast_requested","data":{"jobId":"${jobId}","early":"1"}}`);
+  return "broadcasting";
 }
 
 // ── SPLIT STAGE 5 (v2.5): fresh 300 Tgas tx — exec-b + auto-settle ──────────
@@ -664,8 +684,8 @@ function setJobStatus(jobId: string, status: string): void {
 // One builder for all three outlayer request_execution calls.
 // callback/cbGas empty (onSignDone) = fire-and-forget: exec-b's failure surfaces
 // as the job stuck in `broadcasting`, recoverable by settle(owner, "0").
-function requestWasmExecution(wasmUrl: string, hash: string, input: string, callback: string, jobId: string, cbGas: number): void {
-  const args = `{"source":{"WasmUrl":{"url":"${wasmUrl}","hash":"${hash}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":100000000,"max_memory_mb":64,"max_execution_seconds":30},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
+function requestWasmExecution(wasmUrl: string, hash: string, input: string, callback: string, jobId: string, cbGas: number, maxSecs: number = 30): void {
+  const args = `{"source":{"WasmUrl":{"url":"${wasmUrl}","hash":"${hash}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":64,"max_execution_seconds":${maxSecs}},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
   if (callback !== "") {

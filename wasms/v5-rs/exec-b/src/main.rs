@@ -20,7 +20,7 @@ fn run(input: &str) -> String {
     }
     let job_id = parts[0];
     let mut sig58 = parts[1].to_string();
-    let msg_hex = parts[2];
+    let mut msg_hex = parts[2].to_string();
     let _cluster = parts[3];
     let resource_url = parts[4];
     let _chal = parts[5];
@@ -31,10 +31,14 @@ fn run(input: &str) -> String {
     // jobsig:<jobId> via RPC until the MPC sig lands, then settle within
     // seconds.
     if sig58.is_empty() {
-        sig58 = match poll_sig(job_id) {
-            Some(s) => s,
+        // early spawn: poll the contract for jobmsg (exec-a builds it) and
+        // jobsig (MPC lands it) — settle within seconds of the sig.
+        let (m, sg) = match poll_job_state(job_id) {
+            Some(v) => v,
             None => return err("sig never appeared"),
         };
+        msg_hex = m;
+        sig58 = sg;
     }
     if sig58.len() < 80 {
         return err("sig not 64B");
@@ -139,28 +143,33 @@ fn run(input: &str) -> String {
     }
 }
 
-fn poll_sig(job_id: &str) -> Option<String> {
-    let body = format!(
-        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"query\",\"params\":{{\"request_type\":\"view_state\",\"account_id\":\"k2.twin1.gasbench2.testnet\",\"prefix_base64\":\"{}\",\"finality\":\"final\"}}}}",
-        b64(&format!("jobsig:{}", job_id))
-    );
-    for _ in 0..40 {
+fn poll_job_state(job_id: &str) -> Option<(String, String)> {
+    // Returns (msgHex, sig58) once BOTH jobmsg and jobsig are on the
+    // contract. Polls every 3s up to ~180s.
+    for _ in 0..60 {
         if let Ok(resp) = Client::new()
             .post("https://rpc.testnet.near.org")
             .header("Content-Type", "application/json")
-            .body(body.as_bytes())
+            .body(view_args(job_id, "jobmsg:").as_bytes())
             .send()
         {
-            let status = resp.status();
-            if status == 200 {
+            if resp.status() == 200 {
                 if let Ok(bytes) = resp.body() {
                     let text = String::from_utf8_lossy(&bytes).to_string();
                     if let Some(v) = json_string_field(&text, "value_base64") {
                         if let Some(decoded) = b64decode(&v) {
-                            let s = String::from_utf8_lossy(&decoded).to_string();
-                            let sig = s.trim_matches('"').to_string();
-                            if sig.len() >= 80 {
-                                return Some(sig);
+                            let msg = String::from_utf8_lossy(&decoded).to_string();
+                            let msg = msg.trim_matches('"').to_string();
+                            if msg.len() >= 190 {
+                                // msg ready — now wait for sig (short loop)
+                                for _ in 0..40 {
+                                    if let Some(sig) = poll_sig(job_id) {
+                                        return Some((msg, sig));
+                                    }
+                                    if sig_ready(job_id) { continue; }
+                                    std::thread::sleep(std::time::Duration::from_secs(2));
+                                }
+                                return None;
                             }
                         }
                     }
@@ -168,6 +177,41 @@ fn poll_sig(job_id: &str) -> Option<String> {
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    None
+}
+
+fn view_args(job_id: &str, prefix: &str) -> String {
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"query\",\"params\":{{\"request_type\":\"view_state\",\"account_id\":\"k2.twin1.gasbench2.testnet\",\"prefix_base64\":\"{}\",\"finality\":\"final\"}}}}",
+        b64(&format!("{}{}", prefix, job_id))
+    )
+}
+
+fn sig_ready(job_id: &str) -> bool { poll_sig(job_id).is_some() }
+
+fn poll_sig(job_id: &str) -> Option<String> {
+    // single-shot: fetch jobsig:<jobId>, return b58 sig if present
+    if let Ok(resp) = Client::new()
+        .post("https://rpc.testnet.near.org")
+        .header("Content-Type", "application/json")
+        .body(view_args(job_id, "jobsig:").as_bytes())
+        .send()
+    {
+        if resp.status() == 200 {
+            if let Ok(bytes) = resp.body() {
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                if let Some(v) = json_string_field(&text, "value_base64") {
+                    if let Some(decoded) = b64decode(&v) {
+                        let sig = String::from_utf8_lossy(&decoded).to_string();
+                        let sig = sig.trim_matches('"').to_string();
+                        if sig.len() >= 80 {
+                            return Some(sig);
+                        }
+                    }
+                }
+            }
+        }
     }
     None
 }
