@@ -1,0 +1,10 @@
+package near:echotest@0.1.0;
+
+world echo-http {
+    export wasi:cli/run@0.2.12;
+    import wasi:io/poll@0.2.12;
+    import wasi:io/error@0.2.12;
+    import wasi:io/streams@0.2.12;
+    import wasi:cli/stdin@0.2.12;
+    import wasi:cli/stdout@0.2.12;
+}
