@@ -70,7 +70,7 @@ const FT_GAS: number = 10000000000000;
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d544116eb6d0b9";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
-const EXEC_B_HASH: string = "57444e695311be26064ea170d4b446f48c78a37aed036d0a695c140f19493f52";
+const EXEC_B_HASH: string = "110ccd719c6eda14023c44c231b86363221d04b08bcb13edd389d6cd125f1476";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
@@ -90,6 +90,17 @@ export function pinPayTo(suffix: string, payTo58: string, dstAta58: string, mint
   near.storageSet("payto:" + suffix, payTo58);
   near.storageSet("paytoata:" + suffix, dstAta58);
   near.storageSet("paytomint:" + suffix, mint58);
+}
+// v6.3: pin the challenge's stable fields (price micro-USDC + facilitator
+// feePayer). With these pinned, callApi can build the msg ON-CHAIN at call
+// time — no exec-a leg, blockhash comes fresh from the caller.
+export function pinChallenge(suffix: string, price: string, feePayer58: string, networkTag: string): void {
+  if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("self only"); }
+  if (strLen(feePayer58) !== 44) { near.panic("bad feePayer"); }
+  if (networkTag !== "devnet" && networkTag !== "mainnet") { near.panic("bad network"); }
+  near.storageSet("paytoprice:" + suffix, price);
+  near.storageSet("paytofee:" + suffix, feePayer58);
+  near.storageSet("paytonet:" + suffix, networkTag);
 }
 export function payToOf(suffix: string): string {
   return near.storageGet("payto:" + suffix) ?? "";
@@ -164,22 +175,67 @@ export function withdrawToken(amount: string): void {
 }
 
 // ── EMIT: the only entry an agent needs ───────────────────────────────────────
-export function callApi(url: string, suffix: string, budget: string, payer58: string): string {
+// v6.3: ONE exec leg. The caller passes a FRESH blockhash (fetched off-chain
+// seconds before this tx) — the msg is built ON-CHAIN right here from the
+// merchant pins, the MPC sign fires immediately, and onSignDone runs the
+// single settle-only exec. No quote leg, no exec-a leg, no blockhash race:
+// age at settle = sign latency + daemon pickup (~20-60s) < devnet window.
+export function callApi(url: string, suffix: string, budget: string, payer58: string, blockhash58: string): string {
   const caller = near.predecessorAccountId();
   if (url === "" || strLen(url) > 256) { near.panic("bad url"); }
   if (suffix === "" || strLen(suffix) > 32) { near.panic("bad suffix"); }
   if (strLen(payer58) !== 43 && strLen(payer58) !== 44) { near.panic("bad payer"); }
-  if (near.storageGet("payto:" + suffix) === null) { near.panic("unpinned suffix"); }
+  if (strLen(blockhash58) !== 44) { near.panic("bad blockhash"); }
+  const payTo = near.storageGet("payto:" + suffix) ?? "";
+  if (payTo === "") { near.panic("unpinned suffix"); }
+  // challenge pins (v6.3): price + feePayer + network must be pinned
+  const price = near.storageGet("paytoprice:" + suffix) ?? "";
+  const feePayer = near.storageGet("paytofee:" + suffix) ?? "";
+  const network = near.storageGet("paytonet:" + suffix) ?? "";
+  if (price === "" || feePayer === "" || network === "") { near.panic("unpinned challenge"); }
+  // src ATA pin for this payer
+  const srcAta = near.storageGet("srcata:" + payer58) ?? "";
+  if (srcAta === "") { near.panic("unpinned srcAta"); }
+  const dstAta = near.storageGet("paytoata:" + suffix) ?? "";
+  const mint = near.storageGet("paytomint:" + suffix) ?? "";
+  // escrow
   const credit = ledgerGet("credittok:", caller);
   if (u128Lt(budget, "1")) { near.panic("bad budget"); }
   if (u128Gt(budget, credit)) { near.panic("insufficient token credit for budget"); }
+  if (u128Gt(price, budget)) { near.panic("price exceeds budget"); }
   setLedger("credittok:", caller, u128Sub(credit, budget));
   const jobId = sha256Hash(caller + ":" + url + ":" + toStr(near.blockHeight()) + ":" + near.randomSeed());
-  setJobFields(jobId, "quote_phase", jobJson(caller, url, suffix, budget, payer58));
+  setJobFields(jobId, "sign_requested", jobJson(caller, url, suffix, budget, payer58));
+  near.storageSet("jobnet:" + jobId, network);
+  near.storageSet("jobamt:" + jobId, price);
+  near.storageSet("jobchal:" + jobId, ""); // settle-only exec refetches the challenge itself
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.3.0","event":"job_started","data":{"jobId":"${jobId}","owner":"${caller}","url":"${url}","budget":"${budget}"}}`);
-  // funding phase: TEE fetches the 1Click quote (USDC.near → USDC@solana,
-  // recipient = payer); onQuote gates it and fires ft_transfer_call + exec-a.
-  requestWasmExecution(EXEC_QUOTE_WASM, EXEC_QUOTE_HASH, `${jobId}|${payer58}|${budget}`, "onQuote", jobId, CB_GAS_QUOTE);
+  // v0 msg — built HERE, byte layout identical to the old onResult path
+  // (verified vs solders + landed settlements): hdr + 8 keys + blockhash +
+  // CUlimit | CUprice | TransferChecked(price) | Memo(nonce(jobId)).
+  const amtHex = decToLeHexU64(price);
+  // INCREMENTAL accumulation — a single 13+-segment strCat call silently
+  // DROPS segments in this gate (observed: the CUlimit ix progIdx byte
+  // vanished → svalin sim_failed; job f380aec0). Loop-append is the
+  // codebase's proven pattern (exec-a b64decode, msgBin in onResult v1).
+  let msgBin: string = "020104" + "08";
+  msgBin = strCat(msgBin, b58ToHex(feePayer), MPC_PUBKEY_HEX);
+  msgBin = strCat(msgBin, b58ToHex(dstAta), b58ToHex(srcAta));
+  msgBin = strCat(msgBin, CU_PROG_HEX, MEMO_PROG_HEX, TOKEN_PROG_HEX);
+  msgBin = strCat(msgBin, b58ToHex(mint), b58ToHex(blockhash58));
+  msgBin = strCat(msgBin, "04");
+  msgBin = strCat(msgBin, "04", "00", "05", "0260ea0000");
+  msgBin = strCat(msgBin, "04", "00", "09", "03e803000000000000");
+  msgBin = strCat(msgBin, "06", "04", "03", "07", "02", "01", "0a", "0c", amtHex, "06");
+  msgBin = strCat(msgBin, "05", "00", "20", nonceOf(jobId), "00");
+  near.storageSet("jobmsg:" + jobId, msgBin);
+  // MPC sign fires IMMEDIATELY — blockhash clock starts now, ~15-30s
+  const path = caller + "-" + suffix;
+  const args = `{"request":{"payload_v2":{"Eddsa":"80${msgBin}"},"path":"${path}","domain_id":1}}`;
+  const p1 = near.promiseBatchCreate(MPC_CONTRACT);
+  near.promiseBatchActionFunctionCall(p1, "sign", args, "1", SIGN_GAS);
+  near.promiseThen(p1, near.currentAccountId(), "onSignDone", `{"jobId":"${jobId}"}`, "0", CB_GAS_SIGN);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.0.0","event":"sign_requested","data":{"jobId":"${jobId}","path":"${path}","amount":"${price}"}}`);
   return jobId;
 }
 
@@ -474,14 +530,16 @@ export function onSignDone(jobId: string): string {
   const sig58 = b58EncodeBytes(parseSigBytes(respText()));
   if (sig58 === "") { near.panic("sig encode failed"); }
   near.storageSet("jobsig:" + jobId, sig58);
-  setJobStatus(jobId, "sig_done");
-  // early exec-b handles the settle; broadcast() stays as manual fallback
+  setJobStatus(jobId, "broadcasting");
+  // v6.3: THE one exec leg — settle-only, spawned INLINE here with the sig
+  // in the input (30s window, cheap 4.0001e21 fee, no polling mode). The
+  // sig→settle gap = daemon pickup only (~≤60s); blockhash age at settle
+  // = sign latency + pickup ≈ 20-60s — inside the devnet window.
+  const raw2 = near.storageGet("job:" + jobId) ?? "";
+  const jobUrl = near.jsonGetStr("url", raw2) ?? "";
+  const input = `${jobId}|${sig58}|${near.storageGet("jobmsg:" + jobId) ?? ""}|${near.storageGet("jobnet:" + jobId) ?? ""}|${jobUrl}|`;
+  requestWasmExecutionEx(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB, 30);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.5.1","event":"sign_done","data":{"jobId":"${jobId}"}}`);
-  // execBEarly: poll-mode exec-b (empty sig input → it polls jobsig via
-  // RPC). Spawning here (sig just landed) + its own daemon pickup ≈ ≤60s
-  // post-sign — inside the blockhash window, vs ~2min via broadcast().
-  const pEarly = near.promiseBatchCreate(near.currentAccountId());
-  near.promiseBatchActionFunctionCall(pEarly, "execBEarly", `{"jobId":"${jobId}"}`, "0", 280000000000000);
   return "sig_done";
 }
 
@@ -683,9 +741,12 @@ function setJobStatus(jobId: string, status: string): void {
 // callback/cbGas empty (onSignDone) = fire-and-forget: exec-b's failure surfaces
 // as the job stuck in `broadcasting`, recoverable by settle(owner, "0").
 function requestWasmExecutionEx(wasmUrl: string, hash: string, input: string, callback: string, jobId: string, cbGas: number, maxSecs: number): void {
+  // worker prices compute: 1G instr + 170s window = 18.0001e21 (vs 4.0001e21
+  // for 100M/30s). See execution.rs:138 — fee must cover the raised limits.
+  const fee = maxSecs > 30 ? "18001000000000000000000" : EXEC_FEE;
   const args = `{"source":{"WasmUrl":{"url":"${wasmUrl}","hash":"${hash}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":64,"max_execution_seconds":${maxSecs}},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
-  near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
+  near.promiseBatchActionFunctionCall(p, "request_execution", args, fee, EXEC_GAS);
   if (callback !== "") {
     near.promiseThen(p, near.currentAccountId(), callback, `{"jobId":"${jobId}"}`, "0", cbGas);
   }
@@ -730,13 +791,13 @@ const HEXD: string = "0123456789abcdef";
 // per job, distinct across jobs (jobId length + position mix), no randomness
 // needed on-chain. Zero never appears at position 0 (jobIdLen >= 1).
 function nonceOf(jobId: string): string {
-  // msgBin is a HEX template: memo must be 16 ASCII hex-char bytes on the
-  // wire → template holds each char's ASCII code. Previous arithmetic
-  // versions emitted raw nibble bytes (invalid UTF-8) → SPL Memo failed
-  // simulation every time. Division-free 16-entry pair table instead.
+  // Memo spec (x402 exact-svm §3.1): nonce must be "at least 16 bytes,
+  // hex-encoded" = 32+ ASCII chars of hex. First nonceOf emitted 16 chars
+  // (the minimum read as raw bytes) — borderline; pay.py and the landed
+  // settlements use 32 chars (16 bytes hex-encoded). Extend to 32.
   let out = "";
   let i = 0;
-  while (i < 16) {
+  while (i < 32) {
     const c = strSlice(jobId, i, i + 1);
     if (c === "0") { out = strCat(out, "30"); }
     else if (c === "1") { out = strCat(out, "31"); }
