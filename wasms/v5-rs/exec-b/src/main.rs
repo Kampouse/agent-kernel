@@ -111,9 +111,18 @@ fn run(input: &str) -> String {
     match resp {
         Ok(r) => {
             let status = r.status();
+            // surface svalin's payment-* response headers (error details)
+            let mut pay_headers = String::new();
+            for (k, v) in r.headers() {
+                if k.to_lowercase().starts_with("payment-") {
+                    pay_headers.push_str(&format!("\"{}\":\"{}\",", k, v));
+                }
+            }
             let body_bytes = match r.body() { Ok(b) => b, Err(e) => return err(&format!("body: {:?}", e)) };
             let body = String::from_utf8_lossy(&body_bytes).to_string();
-            format!("{{\"ok\":true,\"status\":{},\"body\":{}}}", status, body)
+            let pay_b64_short: String = pay_b64.chars().take(60).collect();
+            format!("{{\"ok\":true,\"status\":{},\"payhdrs\":{{{}}}\"pay\":\"{}\",\"wire_len\":{},\"body\":{}}}",
+                status, pay_headers, pay_b64_short, wire.len(), body)
         }
         Err(e) => err(&format!("settle: {:?}", e)),
     }
