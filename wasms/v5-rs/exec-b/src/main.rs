@@ -41,7 +41,9 @@ fn run(input: &str) -> String {
     wire.push(2);
     wire.extend_from_slice(&[0u8; 64]);
     wire.extend_from_slice(&sig_bytes);
-    wire.push(0x80);
+    // NOTE: the sign payload from exec-a already INCLUDES the leading
+    // 0x80 version byte (pay.py signs b"\x80"+msg; payload = 351B).
+    // Do NOT push another 0x80 here.
     let mut i = 0;
     while i + 2 <= msg_hex.len() {
         match u8::from_str_radix(&msg_hex[i..i + 2], 16) {
