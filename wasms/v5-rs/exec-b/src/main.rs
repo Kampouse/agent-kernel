@@ -146,7 +146,7 @@ fn run(input: &str) -> String {
 fn poll_job_state(job_id: &str) -> Option<(String, String)> {
     // Returns (msgHex, sig58) once BOTH jobmsg and jobsig are on the
     // contract. Polls every 3s up to ~180s.
-    for _ in 0..60 {
+    for _ in 0..55 {
         if let Ok(resp) = Client::new()
             .post("https://rpc.testnet.near.org")
             .header("Content-Type", "application/json")

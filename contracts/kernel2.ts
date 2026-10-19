@@ -60,9 +60,9 @@ const SIGN_GAS: number = 40000000000000;
 const CB_GAS_RESULT: number = 450000000000000; // onResult: own + sign 40 + cb_sign 60
 const CB_GAS_EXECB: number = 60000000000000;
 const CB_GAS_SIGN: number = 300000000000000;  // sign work only (early exec-b handles settle)
-const CB_GAS_QUOTE: number = 720000000000000; // start spawn 680 + own work, 35+ slack
+const CB_GAS_QUOTE: number = 720000000000000; // start spawn 680 + own
 const EXEC_GAS: number = 185000000000000;
-const EXEC_FEE: string = "4000010000000000000000"; // outlayer payment per execution
+const EXEC_FEE: string = "4000100000000000000000"; // outlayer payment per execution (worker requires 4.0001e21)
 const FT_GAS: number = 10000000000000;
 
 // TEE workers: pinned by SHA-256, fetched by outlayer over GitHub raw (CDN lag ~2 min
@@ -70,7 +70,7 @@ const FT_GAS: number = 10000000000000;
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d544116eb6d0b9";
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
-const EXEC_B_HASH: string = "d932e45453352d5f01bb531cd7e73add5f0611a4b5b0958281812f1d7f2ef244";
+const EXEC_B_HASH: string = "57444e695311be26064ea170d4b446f48c78a37aed036d0a695c140f19493f52";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
@@ -219,11 +219,6 @@ export function onQuote(jobId: string): void {
   // can't fit it). start()'s gate allows self-spawn.
   const pStart = near.promiseBatchCreate(near.currentAccountId());
   near.promiseBatchActionFunctionCall(pStart, "start", `{"jobId":"${jobId}"}`, "0", 680000000000000);
-  // EARLY exec-b: spawn now (fresh receipt budget) — it polls jobsig:<jobId>
-  // via RPC and settles within seconds of the MPC sig landing. Spawning
-  // post-sign misses the blockhash window (daemon polls ~60s).
-  const pEarly = near.promiseBatchCreate(near.currentAccountId());
-  near.promiseBatchActionFunctionCall(pEarly, "execBEarly", `{"jobId":"${jobId}"}`, "0", 300000000000000);
 }
 
 // ── SPLIT STAGE 2 (v2.5): fresh 300 Tgas tx — fund + fire exec-a ────────────
@@ -482,8 +477,11 @@ export function onSignDone(jobId: string): string {
   setJobStatus(jobId, "sig_done");
   // early exec-b handles the settle; broadcast() stays as manual fallback
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.5.1","event":"sign_done","data":{"jobId":"${jobId}"}}`);
-  // early exec-b (spawned in onResult) polls jobsig and settles; no
-  // broadcast spawn needed. settle() remains the owner fallback.
+  // execBEarly: poll-mode exec-b (empty sig input → it polls jobsig via
+  // RPC). Spawning here (sig just landed) + its own daemon pickup ≈ ≤60s
+  // post-sign — inside the blockhash window, vs ~2min via broadcast().
+  const pEarly = near.promiseBatchCreate(near.currentAccountId());
+  near.promiseBatchActionFunctionCall(pEarly, "execBEarly", `{"jobId":"${jobId}"}`, "0", 280000000000000);
   return "sig_done";
 }
 
@@ -498,12 +496,12 @@ export function execBEarly(jobId: string): string {
   const owner = near.jsonGetStr("owner", raw) ?? "";
   if (caller !== owner && caller !== near.currentAccountId()) { near.panic("owner only"); }
   const st = (near.jsonGetStr("status", raw) ?? "");
-  if (st !== "quote_ready" && st !== "sign_requested") { near.panic("bad state " + st); }
+  if (st !== "sig_done" && st !== "quote_ready" && st !== "sign_requested") { near.panic("bad state " + st); }
   setJobStatus(jobId, "broadcasting");
   const jobUrl = near.jsonGetStr("url", raw) ?? "";
   // empty sig field → exec-b polls jobsig:<jobId> itself
   const input = `${jobId}||${near.storageGet("jobmsg:" + jobId) ?? ""}|${near.storageGet("jobnet:" + jobId) ?? ""}|${jobUrl}|${near.storageGet("jobchal:" + jobId) ?? ""}`;
-  requestWasmExecution(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB, 240);
+  requestWasmExecutionEx(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB, 170);
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.6.0","event":"broadcast_requested","data":{"jobId":"${jobId}","early":"1"}}`);
   return "broadcasting";
 }
@@ -684,7 +682,7 @@ function setJobStatus(jobId: string, status: string): void {
 // One builder for all three outlayer request_execution calls.
 // callback/cbGas empty (onSignDone) = fire-and-forget: exec-b's failure surfaces
 // as the job stuck in `broadcasting`, recoverable by settle(owner, "0").
-function requestWasmExecution(wasmUrl: string, hash: string, input: string, callback: string, jobId: string, cbGas: number, maxSecs: number = 30): void {
+function requestWasmExecutionEx(wasmUrl: string, hash: string, input: string, callback: string, jobId: string, cbGas: number, maxSecs: number): void {
   const args = `{"source":{"WasmUrl":{"url":"${wasmUrl}","hash":"${hash}","build_target":"wasm32-wasip2"}},"resource_limits":{"max_instructions":1000000000,"max_memory_mb":64,"max_execution_seconds":${maxSecs}},"input_data":${jsonQuote(input)},"response_format":"Text"}`;
   const p = near.promiseBatchCreate(OUTLAYER_CONTRACT);
   near.promiseBatchActionFunctionCall(p, "request_execution", args, EXEC_FEE, EXEC_GAS);
@@ -692,6 +690,11 @@ function requestWasmExecution(wasmUrl: string, hash: string, input: string, call
     near.promiseThen(p, near.currentAccountId(), callback, `{"jobId":"${jobId}"}`, "0", cbGas);
   }
 }
+
+function requestWasmExecution(wasmUrl: string, hash: string, input: string, callback: string, jobId: string, cbGas: number): void {
+  requestWasmExecutionEx(wasmUrl, hash, input, callback, jobId, cbGas, 30);
+}
+
 
 // promiseResult(0): outlayer serializes the Text output as a JSON string, so the
 // payload arrives ESCAPED (\" → \\\"). Field values this kernel reads are fixed-format
