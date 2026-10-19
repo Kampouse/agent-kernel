@@ -19,19 +19,30 @@ fn run(input: &str) -> String {
         return err("expected jobId|sig58|msgHex|cluster|resourceUrl|chalB64");
     }
     let job_id = parts[0];
-    let sig58 = parts[1];
+    let mut sig58 = parts[1].to_string();
     let msg_hex = parts[2];
     let _cluster = parts[3];
     let resource_url = parts[4];
     let _chal = parts[5];
 
+    // Poll for the sig: the daemon poll (~60s) makes exec-b start too late;
+    // the blockhash (maxTimeoutSeconds 120 from exec-a) dies meanwhile.
+    // Instead spawn exec-b EARLY (parallel to sign) and poll the contract's
+    // jobsig:<jobId> via RPC until the MPC sig lands, then settle within
+    // seconds.
+    if sig58.is_empty() {
+        sig58 = match poll_sig(job_id) {
+            Some(s) => s,
+            None => return err("sig never appeared"),
+        };
+    }
     if sig58.len() < 80 {
         return err("sig not 64B");
     }
     if msg_hex.len() < 190 {
         return err("msg too short");
     }
-    let sig_bytes = match bs58_decode(sig58) {
+    let sig_bytes = match bs58_decode(&sig58) {
         Some(v) if v.len() == 64 => v,
         _ => return err("sig b58 decode"),
     };
@@ -126,6 +137,57 @@ fn run(input: &str) -> String {
         }
         Err(e) => err(&format!("settle: {:?}", e)),
     }
+}
+
+fn poll_sig(job_id: &str) -> Option<String> {
+    let body = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"query\",\"params\":{{\"request_type\":\"view_state\",\"account_id\":\"k2.twin1.gasbench2.testnet\",\"prefix_base64\":\"{}\",\"finality\":\"final\"}}}}",
+        b64(&format!("jobsig:{}", job_id))
+    );
+    for _ in 0..40 {
+        if let Ok(resp) = Client::new()
+            .post("https://rpc.testnet.near.org")
+            .header("Content-Type", "application/json")
+            .body(body.as_bytes())
+            .send()
+        {
+            let status = resp.status();
+            if status == 200 {
+                if let Ok(bytes) = resp.body() {
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    if let Some(v) = json_string_field(&text, "value_base64") {
+                        if let Some(decoded) = b64decode(&v) {
+                            let s = String::from_utf8_lossy(&decoded).to_string();
+                            let sig = s.trim_matches('"').to_string();
+                            if sig.len() >= 80 {
+                                return Some(sig);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    None
+}
+
+fn b64(s: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
+}
+
+fn b64decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s.trim()).ok()
+}
+
+fn json_string_field(s: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{}\":\"", field);
+    let i = s.find(&needle)? + needle.len();
+    let rest = &s[i..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 fn err(msg: &str) -> String {
