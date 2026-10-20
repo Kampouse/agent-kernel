@@ -116,8 +116,14 @@ export function payToOf(suffix: string): string {
 // Payer-side source ATA: PDA(payer, mint) — can't derive on-chain (b58 bignum),
 // pinned per payer by the operator (verified off-chain) before jobs use it.
 export function pinSrcAta(payer58: string, srcAta58: string): void {
-  if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("self only"); }
-  if ((strLen(payer58) !== 43 && strLen(payer58) !== 44) || strLen(srcAta58) !== 44) { near.panic("bad pin args"); }
+  // v6.5: self-service — a caller may pin the source ATA for their OWN
+  // derived payer (b58ToHex(payer58) == pub:caller). The operator pin
+  // stays available for the k2-self lane (fallback key has no pub row).
+  const caller = near.predecessorAccountId();
+  if ((strLen(payer58) !== 43 && strLen(payer58) !== 44) || (strLen(srcAta58) !== 43 && strLen(srcAta58) !== 44)) { near.panic("bad pin args"); }
+  const pubHex = near.storageGet("pub:" + caller)
+    ?? (caller === near.currentAccountId() ? MPC_PUBKEY_HEX : "");
+  if (pubHex === "" || b58ToHex(payer58) !== pubHex) { near.panic("payer not yours"); }
   near.storageSet("srcata:" + payer58, srcAta58);
 }
 
@@ -163,6 +169,17 @@ export function creditTokenOf(user: string): string {
 // TEST-LANE ONLY: the usdc.kampy mock FT's ledger is corrupted (s:bal rows
 // zeroed while the bare pool grew — repeated ERR_BAL runs, 2026-10-18).
 // Owner-direct credit to keep the pipeline testable without the FT.
+// operator credit transfer: move token credit from the contract's own
+// balance to an external agent (onboarding path while the FT rail is down).
+export function ownerGrant(user: string, amount: string): string {
+  if (near.predecessorAccountId() !== near.currentAccountId()) { near.panic("self only"); }
+  const bal = ledgerGet("credittok:", near.currentAccountId());
+  if (u128Lt(bal, amount)) { near.panic("insufficient credit"); }
+  setLedger("credittok:", near.currentAccountId(), u128Sub(bal, amount));
+  setLedger("credittok:", user, u128Add(ledgerGet("credittok:", user), amount));
+  return ledgerGet("credittok:", user);
+}
+
 export function ownerMint(amount: string): string {
   const caller = near.predecessorAccountId();
   // only k2's own access key can produce predecessor == currentAccountId
