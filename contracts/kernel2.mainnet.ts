@@ -74,12 +74,15 @@ const FT_GAS: number = 10000000000000;
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d544116eb6d0b9";
-// exec-b: LISP-RLM build (v4 source, NEW compiler after the P1 fixes —
-// :: ann strip + forward-ref pre-scan in compile_outlayer). The ON-CHAIN
-// contract and the TEE worker are now BOTH lisp-rlm. -rs (110ccd71…476,
-// direct HTTP) kept as fallback; v4 settles via relay /x402.
-const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "f51f13ef31c7744146bf06d4766f002cf4d642d3df531b6dbe56bf8ddc04f884";
+// exec-b: RUST (direct HTTP) — LIVE PIN. The lisp-rlm rebuild is BLOCKED
+// on the P2 stitcher: compile_outlayer emits a P1 module (outlayer.testnet
+// demands P2 components: "Not a valid WASI Preview 2 component") and
+// compile_outlayer_p2 leaves host sentinel 0xFF000007 unresolved when
+// need_wasi_http=true (MaxStack(FunctionIndex) in wasmtime). Compiler-side
+// fixes landed in lisp-rlm (:: ann strip + forward-ref pre-scan + P2
+// unconditional strip); the sentinel remap is the last gap.
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
+const EXEC_B_HASH: string = "110ccd719c6eda14023c44c231b86363221d04b08bcb13edd389d6cd125f1476";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
@@ -194,6 +197,10 @@ export function callApi(url: string, suffix: string, budget: string, payer58: st
   if (url === "" || strLen(url) > 256) { near.panic("bad url"); }
   if (suffix === "" || strLen(suffix) > 32) { near.panic("bad suffix"); }
   if (strLen(payer58) !== 43 && strLen(payer58) !== 44) { near.panic("bad payer"); }
+  // base58 drops leading zero bytes → ~1/256 blockhashes serialize to 43
+  // chars (observed live: KbHRZBfNqLxWZ8xNZzSfhp6qdH6dCJ8KMgmwbUUMCiV).
+  // Pad with a leading '1' (zero byte in b58) so decode is always 32B.
+  if (strLen(blockhash58) === 43) { blockhash58 = "1" + blockhash58; }
   if (strLen(blockhash58) !== 44) { near.panic("bad blockhash"); }
   const payTo = near.storageGet("payto:" + suffix) ?? "";
   if (payTo === "") { near.panic("unpinned suffix"); }
@@ -209,7 +216,7 @@ export function callApi(url: string, suffix: string, budget: string, payer58: st
   const mint = near.storageGet("paytomint:" + suffix) ?? "";
   // payer MUST be the caller's MPC-derived key (per-wallet-per-call)
   let pubHex = near.storageGet("pub:" + caller) ?? "";
-  // MAINNET BUILD: no pin seed — testnet pin is a different-network key
+  // MAINNET BUILD: no pin seed
   // (derive keys are network-scoped); every caller derives its own.
   if (pubHex === "") {
     // first call from this caller: derive key async, caller retries after
