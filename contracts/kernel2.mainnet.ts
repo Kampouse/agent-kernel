@@ -74,15 +74,12 @@ const FT_GAS: number = 10000000000000;
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d544116eb6d0b9";
-// exec-b: RUST (direct HTTP) — LIVE PIN. The lisp-rlm rebuild is BLOCKED
-// on the P2 stitcher: compile_outlayer emits a P1 module (outlayer.testnet
-// demands P2 components: "Not a valid WASI Preview 2 component") and
-// compile_outlayer_p2 leaves host sentinel 0xFF000007 unresolved when
-// need_wasi_http=true (MaxStack(FunctionIndex) in wasmtime). Compiler-side
-// fixes landed in lisp-rlm (:: ann strip + forward-ref pre-scan + P2
-// unconditional strip); the sentinel remap is the last gap.
-const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
-const EXEC_B_HASH: string = "110ccd719c6eda14023c44c231b86363221d04b08bcb13edd389d6cd125f1476";
+// exec-b: LISP-RLM — v4 source rebuilt with the FIXED compiler (P2
+// component: input-host→stdin shims in build_combined_p2_core). On-chain
+// AND outlayer legs are now both lisp-rlm. -rs (110ccd71…) kept as
+// fallback. v4 settles via relay /x402; merchant URL hardcoded chercher.
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
+const EXEC_B_HASH: string = "c0f3a669d45f2b7e146095a06c1c13810672c425df28cbc4c29ad81f90fec856";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
