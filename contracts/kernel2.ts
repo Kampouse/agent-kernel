@@ -77,8 +77,8 @@ const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d
 // component: input-host→stdin shims in build_combined_p2_core). On-chain
 // AND outlayer legs are now both lisp-rlm. -rs (110ccd71…) kept as
 // fallback. v4 settles via relay /x402; merchant URL hardcoded chercher.
-const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "cd80e34c4d9e53d104fe7408750663644fb8a63e36204ad97b187aaf38a53fcf";
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
+const EXEC_B_HASH: string = "110ccd719c6eda14023c44c231b86363221d04b08bcb13edd389d6cd125f1476";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
@@ -598,6 +598,15 @@ function parseExecAResult(jobId: string, raw: string, resp: string): void {
   near.storageSet("jobchal:" + jobId, chalB64);
   near.storageSet("jobamt:" + jobId, amount);
   setJobStatus(jobId, "sign_requested");
+  // v6.4: spawn the settle wasm NOW (parallel to the MPC sign) — it polls
+  // jobmsg/jobsig via RPC and settles within seconds of the signature,
+  // inside the blockhash window. The old post-sign spawn missed it (daemon
+  // pickup ~60s+ → blockhash dead → simulation_failed).
+  const earlyUrl = near.jsonGetStr("url", raw) ?? "";
+  const earlyInput = `${jobId}||${msgBin}|${near.storageGet("jobnet:" + jobId) ?? ""}|${earlyUrl}|${chalB64}`;
+  near.storageSet("jobearly:" + jobId, "1");
+  requestWasmExecutionEx(EXEC_B_WASM, EXEC_B_HASH, earlyInput, "onExecBDone", jobId, CB_GAS_EXECB, 170);
+  near.log(`EVENT_JSON:{"standard":"kernel","version":"2.6.1","event":"broadcast_requested","data":{"jobId":"${jobId}","early":"1"}}`);
   // MPC sign via raw promise batch (insigner's proven wire), callback to self
   // MPC signs "80" + msg — the v0 version byte is part of the signed message bytes
   // (proven: facilitator rejects sigs computed without it).
@@ -627,7 +636,12 @@ export function onSignDone(jobId: string): string {
   const raw2 = near.storageGet("job:" + jobId) ?? "";
   const jobUrl = near.jsonGetStr("url", raw2) ?? "";
   const input = `${jobId}|${sig58}|${near.storageGet("jobmsg:" + jobId) ?? ""}|${near.storageGet("jobnet:" + jobId) ?? ""}|${jobUrl}|`;
-  requestWasmExecutionEx(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB, 30);
+  // v6.4: the early-spawned exec-b (running since sign_requested) owns the
+  // settle; spawning another here would double-settle. Only fall back to
+  // the post-sign spawn if the early exec never went out.
+  if (near.storageGet("jobearly:" + jobId) === null) {
+    requestWasmExecutionEx(EXEC_B_WASM, EXEC_B_HASH, input, "onExecBDone", jobId, CB_GAS_EXECB, 30);
+  }
   near.log(`EVENT_JSON:{"standard":"kernel","version":"2.5.1","event":"sign_done","data":{"jobId":"${jobId}"}}`);
   return "sig_done";
 }
