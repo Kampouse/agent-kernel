@@ -73,12 +73,12 @@ const FT_GAS: number = 10000000000000;
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d544116eb6d0b9";
-// exec-b: RUST version (direct HTTP, no relay hop) for the OUTLAYER leg —
-// dialect unconstrained there. The ON-CHAIN contract is and stays lisp-rlm.
-// (v4 lisp-rlm alternative: c0522534…2b45, settles via relay /x402 — kept
-// as fallback if outlayer static-core ever blocks direct big-header POSTs.)
-const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
-const EXEC_B_HASH: string = "110ccd719c6eda14023c44c231b86363221d04b08bcb13edd389d6cd125f1476";
+// exec-b: LISP-RLM build (v4 source, NEW compiler after the P1 fixes —
+// :: ann strip + forward-ref pre-scan in compile_outlayer). The ON-CHAIN
+// contract and the TEE worker are now BOTH lisp-rlm. -rs (110ccd71…476,
+// direct HTTP) kept as fallback; v4 settles via relay /x402.
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
+const EXEC_B_HASH: string = "f51f13ef31c7744146bf06d4766f002cf4d642d3df531b6dbe56bf8ddc04f884";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
