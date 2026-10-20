@@ -77,8 +77,8 @@ const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d
 // component: input-host→stdin shims in build_combined_p2_core). On-chain
 // AND outlayer legs are now both lisp-rlm. -rs (110ccd71…) kept as
 // fallback. v4 settles via relay /x402; merchant URL hardcoded chercher.
-const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
-const EXEC_B_HASH: string = "110ccd719c6eda14023c44c231b86363221d04b08bcb13edd389d6cd125f1476";
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
+const EXEC_B_HASH: string = "d667b0c868effe0cb4257874cb2631254b44e196b3160a6533d3b84abab52a36";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
