@@ -228,18 +228,157 @@ function x402settle(Q: string, jobId: string, sig58: string, msgHex: string,
   const tail = strSlice("80", 0, 2);
   const wireHex = strCat(ver2, ZERO_SIG, sigHex, tail, msgHex);
 
-  // RELAY settle — the static-core httpGetWithHeader silently mangles the
-  // ~1.4KB PAYMENT-SIGNATURE value ({} every time, probed 2026-10-19);
-  // the relay's /x402 route assembles the payment from wire_hex + a fresh
-  // challenge and returns {status, body, payment-* headers} verbatim.
-  const relayBody = strCat("{\"url\":\"https://svalin-api.noobshole.workers.dev/v1/risk/chercher.near\",\"wire_hex\":\"",
-    wireHex, "\"}");
-  const relayResp = httpPost("https://fetch-relay.kj95hgdgnn.workers.dev/x402", relayBody, "application/json");
-  if (strLen(relayResp) > 0) {
-    return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
-      Q, "result", Q, ":", relayResp, "}");
+  // DIRECT settle — no relay (v7c). Both legs plain GETs from inside the
+  // wasm (challenge rides svalin's payment-required response header):
+  //   leg1: GET resource -> capture payment-required hdr (b64 challenge)
+  //   decode -> resource{...} + accepts[0]{...} (brace-matched raw)
+  //   leg2: GET resource with PAYMENT-SIGNATURE = b64(payment JSON)
+  // P2 codegen notes (both hit live 2026-10-20):
+  // - helper-called-from-helper misreads strLen(s) (b64OfStr saw 378 of
+  //   1514 chars; same class as the inline-bignum bug) -> both b64
+  //   encoders are INLINED here
+  // - quotes via DQ (strSlice'd quote char) to avoid escape-soup
+  const DQ: string = strSlice("\u0022x", 0, 1);
+  // inline hex->b64 of the wire
+  let txB64: string = "";
+  {
+    let bi = 0;
+    const bn = strLen(wireHex);
+    while (bi + 6 <= bn) {
+      const ha = hexPairVal(strSlice(wireHex, bi, bi + 2));
+      const hb = hexPairVal(strSlice(wireHex, bi + 2, bi + 4));
+      const hc = hexPairVal(strSlice(wireHex, bi + 4, bi + 6));
+      txB64 = strCat(txB64,
+        strSlice(B64A, ha / 4, ha / 4 + 1),
+        strSlice(B64A, (ha % 4) * 16 + hb / 16, (ha % 4) * 16 + hb / 16 + 1),
+        strSlice(B64A, (hb % 16) * 4 + hc / 64, (hb % 16) * 4 + hc / 64 + 1),
+        strSlice(B64A, hc % 64, hc % 64 + 1));
+      bi = bi + 6;
+    }
+    const rem = bn - bi;
+    if (rem == 2) {
+      const ha = hexPairVal(strSlice(wireHex, bi, bi + 2));
+      txB64 = strCat(txB64, strSlice(B64A, ha / 4, ha / 4 + 1), strSlice(B64A, (ha % 4) * 16, (ha % 4) * 16 + 1), "==");
+    }
+    if (rem == 4) {
+      const ha = hexPairVal(strSlice(wireHex, bi, bi + 2));
+      const hb = hexPairVal(strSlice(wireHex, bi + 2, bi + 4));
+      txB64 = strCat(txB64,
+        strSlice(B64A, ha / 4, ha / 4 + 1),
+        strSlice(B64A, (ha % 4) * 16 + hb / 16, (ha % 4) * 16 + hb / 16 + 1),
+        strSlice(B64A, (hb % 16) * 4, (hb % 16) * 4 + 1), "=");
+    }
   }
-  return errOut(Q, jobId, "settle: empty relay response");
+  // leg1: fresh challenge from the payment-required response header
+  const chal2048 = httpGetHdr("https://svalin-api.noobshole.workers.dev/v1/risk/chercher.near", "payment-required");
+  let cn: number = 0;
+  let b64 = "";
+  while (cn < 2048) {
+    const ch = strSlice(chal2048, cn, cn + 1);
+    if (strIndexOf("\u0000", ch) == 0) { break; }
+    b64 = strCat(b64, ch);
+    cn = cn + 1;
+  }
+  if (strLen(b64) < 20) { return errOut(Q, jobId, "no challenge hdr"); }
+  const chal = b64ToStr(b64);
+  const resource = extractBraced(chal, "resource");
+  const accepted = extractArray0(chal, "accepts");
+  if (strLen(resource) < 10 || strLen(accepted) < 10) {
+    return errOut(Q, jobId, "challenge missing resource/accepts");
+  }
+  // payment JSON, chunked
+  let payment: string = strCat("{", DQ, "x402Version", DQ, ":2,", DQ, "resource", DQ, ":", resource);
+  payment = strCat(payment, ",", DQ, "accepted", DQ, ":", accepted);
+  payment = strCat(payment, ",", DQ, "payload", DQ, ":{", DQ, "transaction", DQ, ":", DQ);
+  payment = strCat(payment, txB64, DQ, "}}");
+  // inline ascii->b64 (the PAYMENT-SIGNATURE header value)
+  let payHdr: string = "";
+  {
+    let ei = 0;
+    const en = strLen(payment);
+    while (ei + 3 <= en) {
+      const v0 = scanIdx(PRINTABLE, payment.charAt(ei));
+      const v1 = scanIdx(PRINTABLE, payment.charAt(ei + 1));
+      const v2 = scanIdx(PRINTABLE, payment.charAt(ei + 2));
+      const ec0 = v0 + 32;
+      const ec1 = v1 + 32;
+      const ec2 = v2 + 32;
+      const q0 = ec0 / 4;
+      const q1 = (ec0 - q0 * 4) * 16 + ec1 / 16;
+      const q2 = (ec1 - (ec1 / 16) * 16) * 4 + ec2 / 64;
+      const q3 = ec2 - (ec2 / 64) * 64;
+      payHdr = strCat(payHdr, strSlice(B64A, q0, q0 + 1), strSlice(B64A, q1, q1 + 1), strSlice(B64A, q2, q2 + 1), strSlice(B64A, q3, q3 + 1));
+      ei = ei + 3;
+    }
+  }
+  // leg2: settle
+  const paid = httpGetWithHeader(resourceUrl, "PAYMENT-SIGNATURE", payHdr);
+  if (strLen(paid) > 2) {
+    return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
+      Q, "result", Q, ":", paid, "}");
+  }
+  return errOut(Q, jobId, "settle: empty merchant response");
+}
+
+// base64 -> ASCII (JSON text). 4 chars -> 3 bytes via B64A scan.
+function b64ToStr(s: string): string {
+  let out = "";
+  let i = 0;
+  const total = strLen(s);
+  while (i + 4 <= total) {
+    const c0 = scanIdx(B64A, strSlice(s, i, i + 1));
+    const c1 = scanIdx(B64A, strSlice(s, i + 1, i + 2));
+    const c2 = scanIdx(B64A, strSlice(s, i + 2, i + 3));
+    const c3 = scanIdx(B64A, strSlice(s, i + 3, i + 4));
+    const b0 = c0 * 4 + c1 / 16;
+    const b1 = (c1 - (c1 / 16) * 16) * 16 + c2 / 4;
+    const b2 = (c2 - (c2 / 4) * 4) * 64 + c3;
+    out = strCat(out, strSlice(PRINTABLE, b0 - 32, b0 - 31), strSlice(PRINTABLE, b1 - 32, b1 - 31), strSlice(PRINTABLE, b2 - 32, b2 - 31));
+    i = i + 4;
+  }
+  return out;
+}
+
+// raw value of "key":{...} with brace-depth matching
+function extractBraced(j: string, key: string): string {
+  const DQ: string = strSlice("\u0022x", 0, 1);
+  const pat = strCat(DQ, key, DQ, ":{");
+  const at = strIndexOf(j, pat);
+  if (at < 0) { return ""; }
+  const start = at + strLen(pat) - 1;
+  let depth = 0;
+  let p = start;
+  while (p < strLen(j)) {
+    const ch = strSlice(j, p, p + 1);
+    if (ch == "{") { depth = depth + 1; }
+    if (ch == "}") {
+      depth = depth - 1;
+      if (depth == 0) { return strSlice(j, start, p + 1); }
+    }
+    p = p + 1;
+  }
+  return "";
+}
+
+// raw value of "key":[{...},...] -> first object of the array
+function extractArray0(j: string, key: string): string {
+  const DQ: string = strSlice("\u0022x", 0, 1);
+  const pat = strCat(DQ, key, DQ, ":[{");
+  const at = strIndexOf(j, pat);
+  if (at < 0) { return ""; }
+  const start = at + strLen(pat) - 1;
+  let depth = 0;
+  let p = start;
+  while (p < strLen(j)) {
+    const ch = strSlice(j, p, p + 1);
+    if (ch == "{") { depth = depth + 1; }
+    if (ch == "}") {
+      depth = depth - 1;
+      if (depth == 0) { return strSlice(j, start, p + 1); }
+    }
+    p = p + 1;
+  }
+  return "";
 }
 
 function errOut(Q: string, jobId: string, msg: string): string {
