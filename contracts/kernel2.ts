@@ -73,8 +73,14 @@ const FT_GAS: number = 10000000000000;
 // after a push — re-hash before re-pinning).
 const EXEC_A_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-a.wasm";
 const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d544116eb6d0b9";
-const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v5-rs/exec-b-rs.wasm";
-const EXEC_B_HASH: string = "110ccd719c6eda14023c44c231b86363221d04b08bcb13edd389d6cd125f1476";
+// lisp-rlm exec-b (v4) — the version that LANDED every settlement; the -rs
+// rewrite was built against misdiagnosed failures (real root cause = memo
+// dataLen byte in the contract msg). v4 settles via relay /x402 (verified
+// alive + reaching svalin 2026-10-20). Note: merchant URL is hardcoded to
+// the chercher svalin endpoint in v4's relay mode — per-merchant support
+// needs a v4.1 that forwards input resourceUrl.
+const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
+const EXEC_B_HASH: string = "c0522534b2d334e6d038de7678b24c5569d36cd6bb907d26491cf96280de2b45";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
