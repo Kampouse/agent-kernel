@@ -34,7 +34,7 @@ export function run(input: string): string {
     return x402settle(Q, jobId, sig58, msgHex, resourceUrl, chalB64);
   }
   if (strLen(sig58) < 80) {
-    return errOut(Q, jobId, "settle: empty merchant response");
+  return errOut(Q, jobId, "settle: empty merchant response");
   }
   if (strLen(msgHex) < 190) {
     return strCat("{", Q, "ok", Q, ":false,", Q, "jobId", Q, ":", Q, jobId, Q, ",", Q, "error", Q, ":", Q, "bad msg", Q, "}");
@@ -336,7 +336,7 @@ function x402settle(Q: string, jobId: string, sig58: string, msgHex: string,
     return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
       Q, "result", Q, ":", paid, "}");
   }
-  return errOut(Q, jobId, "settle: empty merchant response");
+  return errOut(Q, jobId, strCat("settle fail|payLen=", toString(strLen(payHdr)), "|payHead=", strSlice(payHdr, 0, 60), "|payTail=", strSlice(payHdr, strLen(payHdr) - 60, strLen(payHdr))));
 }
 
 // base64 -> ASCII (JSON text). 4 chars -> 3 bytes via B64A scan.
