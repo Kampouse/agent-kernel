@@ -2,7 +2,7 @@
 // stdin (x402): "jobId|sig58|msgHex|cluster|resourceUrl|chalB64"
 // stdin (broadcast): "jobId|sig58|msgHex|cluster"
 // x402: assemble partial v0 wire (zeroSig + ourSig + 0x80 + msg), b64 it, inject
-// into the challenge, POST via relay with PAYMENT-SIGNATURE. The merchant's
+// into the challenge, POST direct with PAYMENT-SIGNATURE. The merchant's
 // facilitator co-signs as fee payer and settles; the risk JSON is the job result.
 // NO broadcast in this lane — the client never submits; that's the facilitator's job.
 // stdout: {"ok":true,"jobId":"...","sig58":"...","slot":"..."} | {"ok":false,...,"error":"..."}
@@ -16,8 +16,6 @@ const HEXD: string = "0123456789abcdef";
 const B58: string = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const B64A: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const PRINTABLE: string = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
-const RELAY_URL: string = "https://fetch-relay.kj95hgdgnn.workers.dev";
-const RELAY_X402: string = "https://fetch-relay.kj95hgdgnn.workers.dev/x402";
 const X402_RESOURCE_URL: string = "https://svalin-api.noobshole.workers.dev/v1/risk/chercher.near";
 
 
@@ -188,11 +186,9 @@ function x402settle(Q: string, jobId: string, sig58: string, msgHex: string,
                     resourceUrl: string, chalB64: string): string {
   // The P2 gate truncates long dynamic strCat loops (varied content cut at 100
   // chars; probed d19/d21), so the wasm does NO b64 of its own: it ships the raw
-  // pieces (sig58, msgHex, chalB64) and the relay's /x402 endpoint assembles,
   // base64s, headers and POSTs the payment. Zero-error surface here.
   if (strLen(sig58) < 80) { return errOut(Q, jobId, "bad sig"); }
   if (strLen(msgHex) < 100) { return errOut(Q, jobId, "bad msg"); }
-  // chalB64 unused in relay-mode (relay self-fetches the challenge).
 
   // sig b58 -> 64B hex (inline bignum)
   const digits: number[] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
