@@ -78,7 +78,7 @@ const EXEC_A_HASH: string = "9bdab87e04cf47f0b9a32a44189366fa02267c2fe8ce81a078d
 // AND outlayer legs are now both lisp-rlm. -rs (110ccd71…) kept as
 // fallback. v4 settles via relay /x402; merchant URL hardcoded chercher.
 const EXEC_B_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-b.wasm";
-const EXEC_B_HASH: string = "4eebc0fdf916f9145c71fbb0697e7faa4c535c891cfeb724b57da9605c78b579";
+const EXEC_B_HASH: string = "d667b0c868effe0cb4257874cb2631254b44e196b3160a6533d3b84abab52a36";
 const EXEC_QUOTE_WASM: string = "https://raw.githubusercontent.com/Kampouse/agent-kernel/main/wasms/v4/exec-quote.wasm";
 const EXEC_QUOTE_HASH: string = "70c637480084eb0668b7bb897112f8e74130abef285f6e4eebcffbc194870c5d";
 
