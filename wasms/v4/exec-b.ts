@@ -310,9 +310,28 @@ function x402settle(Q: string, jobId: string, sig58: string, msgHex: string,
       payHdr = strCat(payHdr, strSlice(B64A, q0, q0 + 1), strSlice(B64A, q1, q1 + 1), strSlice(B64A, q2, q2 + 1), strSlice(B64A, q3, q3 + 1));
       ei = ei + 3;
     }
+    // remainder (1 or 2 bytes) — without this the last payment bytes are
+    // silently dropped (1912 vs 1916 chars observed)
+    if (en - ei == 1) {
+      const v0 = scanIdx(PRINTABLE, payment.charAt(ei));
+      const ec0 = v0 + 32;
+      const q0 = ec0 / 4;
+      const q1 = (ec0 - q0 * 4) * 16;
+      payHdr = strCat(payHdr, strSlice(B64A, q0, q0 + 1), strSlice(B64A, q1, q1 + 1), "==");
+    }
+    if (en - ei == 2) {
+      const v0 = scanIdx(PRINTABLE, payment.charAt(ei));
+      const v1 = scanIdx(PRINTABLE, payment.charAt(ei + 1));
+      const ec0 = v0 + 32;
+      const ec1 = v1 + 32;
+      const q0 = ec0 / 4;
+      const q1 = (ec0 - q0 * 4) * 16 + ec1 / 16;
+      const q2 = (ec1 - (ec1 / 16) * 16) * 4;
+      payHdr = strCat(payHdr, strSlice(B64A, q0, q0 + 1), strSlice(B64A, q1, q1 + 1), strSlice(B64A, q2, q2 + 1), "=");
+    }
   }
   // leg2: settle
-  const paid = httpGetWithHeader(resourceUrl, "PAYMENT-SIGNATURE", payHdr);
+  const paid = httpGetWithHeader(strCat(resourceUrl, "?"), "PAYMENT-SIGNATURE", payHdr);
   if (strLen(paid) > 2) {
     return strCat("{", Q, "ok", Q, ":true,", Q, "jobId", Q, ":", Q, jobId, Q, ",",
       Q, "result", Q, ":", paid, "}");
